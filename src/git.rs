@@ -27,8 +27,12 @@ impl GitRepo {
     }
 
     pub fn is_clean(&self) -> Result<bool> {
-        let output = self.git(&["status", "--porcelain"])?;
-        Ok(output.trim().is_empty())
+        let output = Command::new("git")
+            .args(["diff-index", "--quiet", "HEAD", "--"])
+            .current_dir(&self.root)
+            .output()
+            .context("failed to run git diff-index")?;
+        Ok(output.status.success())
     }
 
     pub fn ensure_clean(&self) -> Result<()> {

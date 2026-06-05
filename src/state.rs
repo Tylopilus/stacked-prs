@@ -104,6 +104,19 @@ impl RepoState {
     }
 
     pub fn validate(&self, repo: &GitRepo) -> Result<()> {
+        self.validate_metadata(repo)?;
+        for branch in &self.branches {
+            if branch.status != BranchStatus::Archived {
+                repo.ensure_branch_exists(&branch.name)?;
+            }
+            if branch.parent != self.repo.trunk {
+                repo.ensure_branch_exists(&branch.parent)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn validate_metadata(&self, repo: &GitRepo) -> Result<()> {
         if self.version != 1 {
             anyhow::bail!("unsupported state version: {}", self.version);
         }
@@ -117,19 +130,6 @@ impl RepoState {
         graph::build(self)?;
         repo.ensure_branch_exists(&self.repo.trunk)?;
         for branch in &self.branches {
-            if branch.parent != self.repo.trunk && self.branch(&branch.parent).is_none() {
-                return Err(StackError::InvalidGraph(format!(
-                    "parent '{}' for branch '{}' is not tracked and is not trunk",
-                    branch.parent, branch.name
-                ))
-                .into());
-            }
-            if branch.status != BranchStatus::Archived {
-                repo.ensure_branch_exists(&branch.name)?;
-            }
-            if branch.parent != self.repo.trunk {
-                repo.ensure_branch_exists(&branch.parent)?;
-            }
             repo.ensure_commit_exists(&branch.recorded_parent_tip)?;
         }
         Ok(())

@@ -24,22 +24,35 @@ pub fn build_status_report(repo: &GitRepo, state: &RepoState) -> Result<Vec<Bran
             .branch(branch_name)
             .expect("branch should exist in report build");
         let effective_parent = effective_parent(state, branch);
-        let current_parent_tip = repo.branch_tip(&effective_parent)?;
-        let drift = if branch.status == BranchStatus::Merged {
+        let branch_exists = repo.branch_exists(&branch.name)?;
+        let current_parent_tip = repo.branch_tip(&effective_parent).ok();
+        let drift = if !branch_exists {
+            "missing".to_string()
+        } else if current_parent_tip.is_none() {
+            "parent_missing".to_string()
+        } else if branch.status == BranchStatus::Merged {
             "merged".to_string()
-        } else if branch.recorded_parent_tip == current_parent_tip {
+        } else if branch.recorded_parent_tip == *current_parent_tip.as_ref().unwrap() {
             "up_to_date".to_string()
         } else {
             "needs_rebase".to_string()
+        };
+        let status = if branch_exists {
+            format_status(&branch.status)
+        } else {
+            "missing".to_string()
         };
         reports.push(BranchStatusReport {
             name: branch.name.clone(),
             parent: branch.parent.clone(),
             effective_parent: effective_parent.clone(),
-            status: format_status(&branch.status),
+            status,
             drift,
             recorded_parent_tip: short_sha(&branch.recorded_parent_tip),
-            current_parent_tip: short_sha(&current_parent_tip),
+            current_parent_tip: current_parent_tip
+                .as_deref()
+                .map(short_sha)
+                .unwrap_or_else(|| "unknown".to_string()),
             pr_target: effective_parent,
         });
     }

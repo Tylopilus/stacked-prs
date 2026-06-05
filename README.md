@@ -26,10 +26,10 @@ Keeping the state repo-local but untracked preserves the local workflow while st
 stacked-prs init [--trunk develop] [--remote origin]
 stacked-prs status [--json]
 stacked-prs create <branch> [--parent <branch>]
-stacked-prs track <branch> --parent <branch>
+stacked-prs track [branch] [--parent <branch>]
 stacked-prs rebase <branch> [--onto <branch>] [--dry-run]
 stacked-prs sync --all [--dry-run]
-stacked-prs mark-merged <branch>
+stacked-prs mark-merged [branch]
 stacked-prs cleanup [--dry-run]
 stacked-prs doctor
 ```
@@ -39,11 +39,17 @@ stacked-prs doctor
 ## Typical flow
 
 ```bash
-stacked-prs create feature/a
+git checkout -b feature/a develop
+stacked-prs track
 stacked-prs create feature/b
 stacked-prs status
 stacked-prs sync --all
 ```
+
+`track` defaults to the current branch and uses the configured trunk as parent when
+`--parent` is omitted. If you run `create` from an untracked feature branch, the CLI
+automatically tracks the current branch with trunk as its parent before creating the
+new stacked child branch.
 
 Use `init` only when you want to set non-default config explicitly:
 

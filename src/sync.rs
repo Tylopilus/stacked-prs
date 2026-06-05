@@ -14,6 +14,8 @@ pub fn sync_all(repo: &GitRepo, all: bool, dry_run: bool) -> Result<()> {
     let mut state = RepoState::load(&repo.root)?;
     state.validate(repo)?;
 
+    let starting_branch = repo.current_branch()?;
+
     if repo.fetch(&state.repo.remote).is_err() {
         println!("Fetch failed; continuing with local refs only");
     }
@@ -51,6 +53,22 @@ pub fn sync_all(repo: &GitRepo, all: bool, dry_run: bool) -> Result<()> {
             .ok_or_else(|| anyhow::anyhow!("branch disappeared from state: {}", plan.branch))?;
         branch.recorded_parent_tip = plan.new_base;
         state.save(&repo.root)?;
+    }
+
+    if starting_branch != state.repo.trunk {
+        repo.checkout(&starting_branch)?;
+    }
+
+    let trunk = &state.repo.trunk;
+    let remote_trunk = format!("origin/{}", trunk);
+    if repo.branch_exists(&remote_trunk)? {
+        let local_tip = repo.branch_tip(trunk)?;
+        let remote_tip = repo.branch_tip(&remote_trunk)?;
+        if local_tip != remote_tip {
+            println!(
+                "Tip: local {trunk} is behind {remote_trunk}. Run 'git checkout {trunk} && git pull' to update."
+            );
+        }
     }
 
     println!("Sync complete");

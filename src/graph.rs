@@ -74,7 +74,9 @@ pub fn descendants_topo<'a>(state: &'a RepoState) -> Result<Vec<&'a str>> {
     let mut roots: Vec<&str> = state
         .branches
         .iter()
-        .filter(|branch| branch.parent == state.repo.trunk)
+        .filter(|branch| {
+            branch.parent == state.repo.trunk || state.branch(&branch.parent).is_none()
+        })
         .map(|branch| branch.name.as_str())
         .collect();
     roots.sort_unstable();
