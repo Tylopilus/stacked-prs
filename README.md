@@ -28,6 +28,9 @@ stacked-prs status [--json]
 stacked-prs create <branch> [--parent <branch>]
 stacked-prs track [branch] [--parent <branch>]
 stacked-prs rebase <branch> [--onto <branch>] [--dry-run]
+stacked-prs reparent <branch> --parent <branch> [--no-rebase] [--dry-run]
+stacked-prs reparent --continue
+stacked-prs reparent --abort
 stacked-prs sync --all [--dry-run]
 stacked-prs mark-merged [branch]
 stacked-prs cleanup [--dry-run]

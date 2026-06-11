@@ -10,6 +10,7 @@ use crate::graph;
 
 const STACK_DIR: &str = ".stacked-prs";
 const STATE_FILE: &str = "state.json";
+const PENDING_FILE: &str = "pending.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepoState {
@@ -47,6 +48,16 @@ pub struct PullRequestRef {
     pub id: String,
     pub url: Option<String>,
     pub target_branch: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingReparent {
+    pub operation: String,
+    pub branch: String,
+    pub old_parent: String,
+    pub new_parent: String,
+    pub old_parent_tip: String,
+    pub new_parent_tip: String,
 }
 
 impl RepoState {
@@ -131,6 +142,63 @@ impl RepoState {
         repo.ensure_branch_exists(&self.repo.trunk)?;
         for branch in &self.branches {
             repo.ensure_commit_exists(&branch.recorded_parent_tip)?;
+        }
+        Ok(())
+    }
+}
+
+impl PendingReparent {
+    pub fn new(
+        branch: String,
+        old_parent: String,
+        new_parent: String,
+        old_parent_tip: String,
+        new_parent_tip: String,
+    ) -> Self {
+        Self {
+            operation: "reparent".to_string(),
+            branch,
+            old_parent,
+            new_parent,
+            old_parent_tip,
+            new_parent_tip,
+        }
+    }
+
+    pub fn path_in(root: &Path) -> PathBuf {
+        root.join(STACK_DIR).join(PENDING_FILE)
+    }
+
+    pub fn load(root: &Path) -> Result<Self> {
+        let path = Self::path_in(root);
+        let raw = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read pending operation at {}", path.display()))?;
+        let pending = serde_json::from_str(&raw)
+            .with_context(|| format!("failed to parse pending operation at {}", path.display()))?;
+        Ok(pending)
+    }
+
+    pub fn load_optional(root: &Path) -> Result<Option<Self>> {
+        let path = Self::path_in(root);
+        if path.exists() {
+            Ok(Some(Self::load(root)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn save(&self, root: &Path) -> Result<()> {
+        let dir = root.join(STACK_DIR);
+        fs::create_dir_all(&dir)?;
+        let raw = serde_json::to_string_pretty(self)?;
+        fs::write(Self::path_in(root), raw)?;
+        Ok(())
+    }
+
+    pub fn clear(root: &Path) -> Result<()> {
+        let path = Self::path_in(root);
+        if path.exists() {
+            fs::remove_file(path)?;
         }
         Ok(())
     }

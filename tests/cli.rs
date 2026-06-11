@@ -77,6 +77,10 @@ fn tracked_branch_count(repo: &Path) -> usize {
     state["branches"].as_array().unwrap().len()
 }
 
+fn pending_operation_exists(repo: &Path) -> bool {
+    repo.join(".stacked-prs/pending.json").exists()
+}
+
 #[test]
 fn init_creates_state_file() {
     let repo = setup_repo();
@@ -143,6 +147,68 @@ fn create_auto_tracks_untracked_current_branch() {
 
     assert_eq!(branch_parent(repo.path(), "feature/a"), "develop");
     assert_eq!(branch_parent(repo.path(), "feature/b"), "feature/a");
+}
+
+#[test]
+fn reparent_updates_state_after_manual_rebase() {
+    let repo = setup_repo();
+    run_stack(repo.path(), &["create", "feature/a"]).success();
+    write_and_commit(repo.path(), "a.txt", "from a\n", "feature a change");
+
+    run_git(repo.path(), &["checkout", "develop"]);
+    run_stack(repo.path(), &["create", "feature/base"]).success();
+    write_and_commit(repo.path(), "base.txt", "from base\n", "base change");
+
+    run_git(repo.path(), &["checkout", "feature/a"]);
+    run_git(repo.path(), &["rebase", "feature/base"]);
+
+    run_stack(
+        repo.path(),
+        &[
+            "reparent",
+            "feature/a",
+            "--parent",
+            "feature/base",
+            "--no-rebase",
+        ],
+    )
+    .success();
+
+    assert_eq!(branch_parent(repo.path(), "feature/a"), "feature/base");
+    run_stack(repo.path(), &["status"])
+        .success()
+        .stdout(predicates::str::contains("drift: up_to_date"));
+}
+
+#[test]
+fn conflicted_reparent_can_be_aborted() {
+    let repo = setup_repo();
+    run_stack(repo.path(), &["create", "feature/a"]).success();
+    write_and_commit(repo.path(), "file.txt", "feature a\n", "feature a change");
+
+    run_git(repo.path(), &["checkout", "develop"]);
+    run_stack(repo.path(), &["create", "feature/base"]).success();
+    write_and_commit(repo.path(), "file.txt", "feature base\n", "base change");
+
+    run_stack(
+        repo.path(),
+        &["reparent", "feature/a", "--parent", "feature/base"],
+    )
+    .failure()
+    .stdout(predicates::str::contains("stack reparent --continue"))
+    .stdout(predicates::str::contains("stack reparent --abort"));
+
+    assert!(pending_operation_exists(repo.path()));
+    assert_eq!(branch_parent(repo.path(), "feature/a"), "develop");
+
+    run_stack(repo.path(), &["status"])
+        .success()
+        .stdout(predicates::str::contains("Pending operation:"));
+
+    run_stack(repo.path(), &["reparent", "--abort"]).success();
+
+    assert!(!pending_operation_exists(repo.path()));
+    assert_eq!(branch_parent(repo.path(), "feature/a"), "develop");
 }
 
 #[test]

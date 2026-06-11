@@ -20,6 +20,8 @@ pub enum Command {
     Track(TrackArgs),
     #[command(about = "Rebase one tracked branch onto its current effective parent")]
     Rebase(RebaseArgs),
+    #[command(about = "Change a tracked branch's parent in the stack")]
+    Reparent(ReparentArgs),
     #[command(about = "Fetch and rebase all tracked branches whose parents moved")]
     Sync(SyncArgs),
     #[command(about = "Mark a tracked branch as squash-merged into trunk")]
@@ -67,6 +69,22 @@ pub struct RebaseArgs {
     #[arg(long, help = "Override the branch to rebase onto")]
     pub onto: Option<String>,
     #[arg(long, help = "Print the planned rebase without running it")]
+    pub dry_run: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct ReparentArgs {
+    #[arg(help = "Tracked branch whose parent should change")]
+    pub branch: Option<String>,
+    #[arg(long, help = "New parent branch")]
+    pub parent: Option<String>,
+    #[arg(long, help = "Only update stack metadata; do not run git rebase")]
+    pub no_rebase: bool,
+    #[arg(long = "continue", help = "Continue a pending conflicted reparent")]
+    pub continue_reparent: bool,
+    #[arg(long, help = "Abort a pending conflicted reparent")]
+    pub abort: bool,
+    #[arg(long, help = "Print the planned reparent without changing anything")]
     pub dry_run: bool,
 }
 

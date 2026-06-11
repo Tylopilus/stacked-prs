@@ -101,8 +101,28 @@ impl GitRepo {
         self.run(&["rebase", "--onto", new_base, old_base, branch])
     }
 
+    pub fn rebase_continue(&self) -> Result<()> {
+        self.run(&["rebase", "--continue"])
+    }
+
+    pub fn rebase_abort(&self) -> Result<()> {
+        self.run(&["rebase", "--abort"])
+    }
+
+    pub fn is_rebase_in_progress(&self) -> Result<bool> {
+        Ok(self.git_path("rebase-merge")?.exists() || self.git_path("rebase-apply")?.exists())
+    }
+
     pub fn branch_tip(&self, branch: &str) -> Result<String> {
         self.rev_parse(branch)
+    }
+
+    fn git_path(&self, path: &str) -> Result<PathBuf> {
+        Ok(PathBuf::from(self.git(&[
+            "rev-parse",
+            "--git-path",
+            path,
+        ])?))
     }
 
     fn git(&self, args: &[&str]) -> Result<String> {

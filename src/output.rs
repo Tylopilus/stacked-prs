@@ -88,7 +88,7 @@ pub fn print_rebase_plan(plan: &RebasePlan) {
     );
 }
 
-fn short_sha(sha: &str) -> String {
+pub fn short_sha(sha: &str) -> String {
     sha.chars().take(7).collect()
 }
 

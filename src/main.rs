@@ -19,7 +19,7 @@ use error::StackError;
 use git::GitRepo;
 use output::{print_status_json, print_status_text};
 use rebase::rebase_branch;
-use state::RepoState;
+use state::{PendingReparent, RepoState};
 use sync::sync_all;
 
 const DEFAULT_TRUNK: &str = "develop";
@@ -45,6 +45,7 @@ fn run() -> Result<()> {
         Command::Rebase(args) => {
             rebase_branch(&repo, &args.branch, args.onto.as_deref(), args.dry_run)
         }
+        Command::Reparent(args) => reparent(&repo, args),
         Command::Sync(args) => sync_all(&repo, args.all, args.dry_run),
         Command::MarkMerged(args) => mark_merged(&repo, args.branch.as_deref()),
         Command::Cleanup(args) => cleanup(&repo, args.dry_run),
@@ -72,6 +73,16 @@ fn status(repo: &GitRepo, json: bool) -> Result<()> {
         print_status_json(&report)?;
     } else {
         print_status_text(&state, &report);
+        if let Some(pending) = PendingReparent::load_optional(&repo.root)? {
+            println!();
+            println!("Pending operation:");
+            println!(
+                "  reparent {}: {} -> {}",
+                pending.branch, pending.old_parent, pending.new_parent
+            );
+            println!("  continue: stack reparent --continue");
+            println!("  abort: stack reparent --abort");
+        }
     }
     Ok(())
 }
@@ -199,6 +210,150 @@ fn mark_merged(repo: &GitRepo, branch: Option<&str>) -> Result<()> {
     managed.status = state::BranchStatus::Merged;
     state.save(&repo.root)?;
     println!("Marked {branch} as merged");
+    Ok(())
+}
+
+fn reparent(repo: &GitRepo, args: cli::ReparentArgs) -> Result<()> {
+    if args.continue_reparent {
+        return reparent_continue(repo, args);
+    }
+    if args.abort {
+        return reparent_abort(repo, args);
+    }
+    if PendingReparent::load_optional(&repo.root)?.is_some() {
+        anyhow::bail!(
+            "pending reparent already exists; run 'stack reparent --continue' or 'stack reparent --abort'"
+        );
+    }
+    repo.ensure_clean()?;
+    let state = RepoState::load(&repo.root)?;
+    state.validate(repo)?;
+    let branch = args.branch.ok_or_else(|| {
+        anyhow::anyhow!("missing branch; use 'stack reparent <branch> --parent <branch>'")
+    })?;
+    let parent = args
+        .parent
+        .ok_or_else(|| anyhow::anyhow!("missing --parent <branch>"))?;
+
+    if branch == parent {
+        anyhow::bail!("branch cannot parent itself: {branch}");
+    }
+    if branch == state.repo.trunk {
+        anyhow::bail!("trunk branch cannot be reparented");
+    }
+    if state.branch(&branch).is_none() {
+        anyhow::bail!("branch not tracked: {branch}");
+    }
+    if parent != state.repo.trunk && state.branch(&parent).is_none() {
+        anyhow::bail!("new parent is not tracked: {parent}");
+    }
+    if !repo.branch_exists(&parent)? {
+        anyhow::bail!("parent branch does not exist locally: {parent}");
+    }
+
+    let managed = state
+        .branch(&branch)
+        .expect("branch existence checked")
+        .clone();
+    let old_parent = managed.parent;
+    let old_parent_tip = managed.recorded_parent_tip;
+    let new_parent_tip = repo.branch_tip(&parent)?;
+
+    println!(
+        "reparent {}: parent={} old_base={} new_base={}",
+        branch,
+        parent,
+        output::short_sha(&old_parent_tip),
+        output::short_sha(&new_parent_tip)
+    );
+
+    if args.dry_run {
+        return Ok(());
+    }
+
+    let pending = PendingReparent::new(
+        branch.clone(),
+        old_parent,
+        parent.clone(),
+        old_parent_tip.clone(),
+        new_parent_tip.clone(),
+    );
+
+    if !args.no_rebase && old_parent_tip != new_parent_tip {
+        pending.save(&repo.root)?;
+        if let Err(err) = repo.rebase_onto(&new_parent_tip, &old_parent_tip, &branch) {
+            println!();
+            println!("Rebase stopped before reparent could finish.");
+            println!("Resolve conflicts, then run: stack reparent --continue");
+            println!("Or abort with: stack reparent --abort");
+            return Err(err);
+        }
+    }
+
+    finalize_reparent(repo, pending)?;
+    Ok(())
+}
+
+fn reparent_continue(repo: &GitRepo, args: cli::ReparentArgs) -> Result<()> {
+    if args.branch.is_some()
+        || args.parent.is_some()
+        || args.no_rebase
+        || args.dry_run
+        || args.abort
+    {
+        anyhow::bail!(
+            "--continue cannot be combined with branch, --parent, --no-rebase, --dry-run, or --abort"
+        );
+    }
+    let pending = PendingReparent::load_optional(&repo.root)?
+        .ok_or_else(|| anyhow::anyhow!("no pending reparent operation"))?;
+
+    if repo.is_rebase_in_progress()? {
+        if let Err(err) = repo.rebase_continue() {
+            println!();
+            println!("Rebase is still not complete.");
+            println!("Resolve conflicts, then run: stack reparent --continue");
+            println!("Or abort with: stack reparent --abort");
+            return Err(err);
+        }
+    }
+
+    finalize_reparent(repo, pending)
+}
+
+fn reparent_abort(repo: &GitRepo, args: cli::ReparentArgs) -> Result<()> {
+    if args.branch.is_some()
+        || args.parent.is_some()
+        || args.no_rebase
+        || args.dry_run
+        || args.continue_reparent
+    {
+        anyhow::bail!(
+            "--abort cannot be combined with branch, --parent, --no-rebase, --dry-run, or --continue"
+        );
+    }
+    let pending = PendingReparent::load_optional(&repo.root)?
+        .ok_or_else(|| anyhow::anyhow!("no pending reparent operation"))?;
+
+    if repo.is_rebase_in_progress()? {
+        repo.rebase_abort()?;
+    }
+    PendingReparent::clear(&repo.root)?;
+    println!("Aborted reparent of {}", pending.branch);
+    Ok(())
+}
+
+fn finalize_reparent(repo: &GitRepo, pending: PendingReparent) -> Result<()> {
+    let mut state = RepoState::load(&repo.root)?;
+    let branch = state
+        .branch_mut(&pending.branch)
+        .ok_or_else(|| anyhow::anyhow!("branch disappeared from state: {}", pending.branch))?;
+    branch.parent = pending.new_parent.clone();
+    branch.recorded_parent_tip = pending.new_parent_tip;
+    state.validate(repo)?;
+    state.save(&repo.root)?;
+    PendingReparent::clear(&repo.root)?;
+    println!("Reparented {}", pending.branch);
     Ok(())
 }
 
