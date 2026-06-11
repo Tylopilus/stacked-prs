@@ -117,6 +117,20 @@ impl GitRepo {
         self.rev_parse(branch)
     }
 
+    pub fn push(&self, remote: &str, branch: &str, force_with_lease: bool) -> Result<()> {
+        if force_with_lease {
+            self.run(&[
+                "push",
+                "--force-with-lease",
+                "--set-upstream",
+                remote,
+                branch,
+            ])
+        } else {
+            self.run(&["push", "--set-upstream", remote, branch])
+        }
+    }
+
     fn git_path(&self, path: &str) -> Result<PathBuf> {
         Ok(PathBuf::from(self.git(&[
             "rev-parse",

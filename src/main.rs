@@ -1,3 +1,4 @@
+mod azure;
 mod cleanup;
 mod cli;
 mod error;
@@ -46,8 +47,15 @@ fn run() -> Result<()> {
             rebase_branch(&repo, &args.branch, args.onto.as_deref(), args.dry_run)
         }
         Command::Reparent(args) => reparent(&repo, args),
-        Command::Sync(args) => sync_all(&repo, args.all, args.dry_run),
+        Command::Sync(args) => sync_all(&repo, args.all, args.dry_run, args.push, args.no_pr),
         Command::MarkMerged(args) => mark_merged(&repo, args.branch.as_deref()),
+        Command::Pr(args) => match args.command {
+            cli::PrCommand::Create(args) => {
+                azure::pr_create(&repo, args.branch, args.title, args.draft)
+            }
+            cli::PrCommand::Sync(_) => azure::pr_sync(&repo),
+        },
+        Command::Land(args) => azure::land(&repo, args.branch),
         Command::Cleanup(args) => cleanup(&repo, args.dry_run),
         Command::Doctor => doctor(&repo),
     }

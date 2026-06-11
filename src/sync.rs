@@ -1,12 +1,13 @@
 use anyhow::Result;
 
+use crate::azure::{self, AzCli};
 use crate::git::GitRepo;
 use crate::graph;
 use crate::output;
 use crate::rebase::{RebasePlan, plan_rebase};
 use crate::state::{BranchStatus, RepoState};
 
-pub fn sync_all(repo: &GitRepo, all: bool, dry_run: bool) -> Result<()> {
+pub fn sync_all(repo: &GitRepo, all: bool, dry_run: bool, push: bool, no_pr: bool) -> Result<()> {
     if !all {
         anyhow::bail!("sync currently requires --all");
     }
@@ -18,6 +19,26 @@ pub fn sync_all(repo: &GitRepo, all: bool, dry_run: bool) -> Result<()> {
 
     if repo.fetch(&state.repo.remote).is_err() {
         println!("Fetch failed; continuing with local refs only");
+    }
+
+    // Reconcile with Azure DevOps before planning: completed PRs mark their
+    // branches as merged automatically, so effective parents redirect to
+    // trunk without a manual `stack mark-merged`.
+    let has_prs = state.branches.iter().any(|branch| branch.pr.is_some());
+    if !no_pr && has_prs {
+        let az = AzCli::new(repo);
+        let mut reconciled_state = state.clone();
+        match azure::reconcile(&az, &mut reconciled_state, !dry_run) {
+            Ok(changed) => {
+                if changed && !dry_run {
+                    reconciled_state.save(&repo.root)?;
+                }
+                state = reconciled_state;
+            }
+            Err(err) => {
+                println!("Warning: PR reconciliation failed ({err:#}); continuing with local state")
+            }
+        }
     }
 
     let mut plans = Vec::<RebasePlan>::new();
@@ -46,17 +67,32 @@ pub fn sync_all(repo: &GitRepo, all: bool, dry_run: bool) -> Result<()> {
         return Ok(());
     }
 
-    for plan in plans {
+    for plan in &plans {
         repo.rebase_onto(&plan.new_base, &plan.old_base, &plan.branch)?;
         let branch = state
             .branch_mut(&plan.branch)
             .ok_or_else(|| anyhow::anyhow!("branch disappeared from state: {}", plan.branch))?;
-        branch.recorded_parent_tip = plan.new_base;
+        branch.recorded_parent_tip = plan.new_base.clone();
         state.save(&repo.root)?;
     }
 
     if starting_branch != state.repo.trunk {
         repo.checkout(&starting_branch)?;
+    }
+
+    if push {
+        for plan in &plans {
+            repo.push(&state.repo.remote, &plan.branch, true)?;
+            println!("Pushed {} (force-with-lease)", plan.branch);
+        }
+    }
+
+    // Refresh the stack overview block in PR descriptions after restacking.
+    if !no_pr && has_prs {
+        let az = AzCli::new(repo);
+        if let Err(err) = azure::update_stack_descriptions(&az, &state) {
+            println!("Warning: failed to update PR descriptions: {err:#}");
+        }
     }
 
     let trunk = &state.repo.trunk;

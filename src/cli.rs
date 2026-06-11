@@ -24,8 +24,12 @@ pub enum Command {
     Reparent(ReparentArgs),
     #[command(about = "Fetch and rebase all tracked branches whose parents moved")]
     Sync(SyncArgs),
-    #[command(about = "Mark a tracked branch as squash-merged into trunk")]
+    #[command(about = "Mark a tracked branch as squash-merged into trunk (manual override)")]
     MarkMerged(MarkMergedArgs),
+    #[command(about = "Manage Azure DevOps pull requests for the stack")]
+    Pr(PrArgs),
+    #[command(about = "Set auto-complete on the bottom PR of the stack (squash + delete source)")]
+    Land(LandArgs),
     #[command(about = "Delete merged leaf branches and prune stale missing branches from state")]
     Cleanup(CleanupArgs),
     #[command(about = "Check repository and stack metadata health")]
@@ -94,6 +98,48 @@ pub struct SyncArgs {
     pub all: bool,
     #[arg(long, help = "Print planned rebases without running them")]
     pub dry_run: bool,
+    #[arg(
+        long,
+        help = "Force-push rebased branches (with lease) to update their PRs"
+    )]
+    pub push: bool,
+    #[arg(long, help = "Skip Azure DevOps PR reconciliation")]
+    pub no_pr: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct PrArgs {
+    #[command(subcommand)]
+    pub command: PrCommand,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum PrCommand {
+    #[command(about = "Push a tracked branch and open a PR targeting its effective parent")]
+    Create(PrCreateArgs),
+    #[command(
+        about = "Reconcile PRs: auto-mark merged branches, retarget drifted PRs, refresh descriptions"
+    )]
+    Sync(PrSyncArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct PrCreateArgs {
+    #[arg(help = "Tracked branch; defaults to the current branch")]
+    pub branch: Option<String>,
+    #[arg(long, help = "PR title; defaults to the branch name")]
+    pub title: Option<String>,
+    #[arg(long, help = "Create the PR as a draft")]
+    pub draft: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct PrSyncArgs {}
+
+#[derive(Args, Debug)]
+pub struct LandArgs {
+    #[arg(help = "Branch to land; defaults to the single stack root with a PR targeting trunk")]
+    pub branch: Option<String>,
 }
 
 #[derive(Args, Debug)]
