@@ -56,24 +56,26 @@ pub fn sync_all(repo: &GitRepo, all: bool, dry_run: bool, push: bool, no_pr: boo
 
     if plans.is_empty() {
         println!("All tracked branches are up to date");
-        return Ok(());
-    }
+        if dry_run || !push {
+            return Ok(());
+        }
+    } else {
+        for plan in &plans {
+            output::print_rebase_plan(plan);
+        }
 
-    for plan in &plans {
-        output::print_rebase_plan(plan);
-    }
+        if dry_run {
+            return Ok(());
+        }
 
-    if dry_run {
-        return Ok(());
-    }
-
-    for plan in &plans {
-        repo.rebase_onto(&plan.new_base, &plan.old_base, &plan.branch)?;
-        let branch = state
-            .branch_mut(&plan.branch)
-            .ok_or_else(|| anyhow::anyhow!("branch disappeared from state: {}", plan.branch))?;
-        branch.recorded_parent_tip = plan.new_base.clone();
-        state.save(&repo.root)?;
+        for plan in &plans {
+            repo.rebase_onto(&plan.new_base, &plan.old_base, &plan.branch)?;
+            let branch = state
+                .branch_mut(&plan.branch)
+                .ok_or_else(|| anyhow::anyhow!("branch disappeared from state: {}", plan.branch))?;
+            branch.recorded_parent_tip = plan.new_base.clone();
+            state.save(&repo.root)?;
+        }
     }
 
     if starting_branch != state.repo.trunk {
@@ -81,9 +83,12 @@ pub fn sync_all(repo: &GitRepo, all: bool, dry_run: bool, push: bool, no_pr: boo
     }
 
     if push {
-        for plan in &plans {
-            repo.push(&state.repo.remote, &plan.branch, true)?;
-            println!("Pushed {} (force-with-lease)", plan.branch);
+        for branch in &state.branches {
+            if branch.status != BranchStatus::Active {
+                continue;
+            }
+            repo.push(&state.repo.remote, &branch.name, true)?;
+            println!("Pushed {} (force-with-lease)", branch.name);
         }
     }
 

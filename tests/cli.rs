@@ -27,6 +27,16 @@ fn run_git(repo: &Path, args: &[&str]) {
     assert!(status.success(), "git command failed: {:?}", args);
 }
 
+fn git_output(repo: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "git command failed: {:?}", args);
+    String::from_utf8(output.stdout).unwrap().trim().to_string()
+}
+
 fn run_stack(repo: &Path, args: &[&str]) -> assert_cmd::assert::Assert {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("stacked-prs"));
     cmd.args(args).current_dir(repo).assert()
@@ -315,4 +325,30 @@ fn sync_rebases_child_after_parent_squash_merge() {
     let diff = String::from_utf8(diff.stdout).unwrap();
     assert!(diff.contains("b.txt"));
     assert!(!diff.contains("a.txt"));
+}
+
+#[test]
+fn sync_push_pushes_active_branch_without_rebase_plan() {
+    let repo = setup_repo();
+    let remote = TempDir::new().unwrap();
+    run_git(remote.path(), &["init", "--bare"]);
+    run_git(
+        repo.path(),
+        &["remote", "add", "origin", remote.path().to_str().unwrap()],
+    );
+    run_git(repo.path(), &["push", "-u", "origin", "develop"]);
+
+    run_stack(repo.path(), &["create", "feature/a"]).success();
+    write_and_commit(repo.path(), "a.txt", "from a\n", "feature a change");
+
+    run_stack(repo.path(), &["sync", "--all", "--push", "--no-pr"])
+        .success()
+        .stdout(predicates::str::contains(
+            "Pushed feature/a (force-with-lease)",
+        ));
+
+    assert_eq!(
+        git_output(repo.path(), &["rev-parse", "feature/a"]),
+        git_output(remote.path(), &["rev-parse", "refs/heads/feature/a"]),
+    );
 }

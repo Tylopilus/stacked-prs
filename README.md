@@ -91,7 +91,7 @@ stacked-prs sync --all --push
 - `pr sync` reconciles tracked PRs with Azure DevOps, marks completed PRs as merged, drops abandoned PR references, retargets active PRs when their expected parent changes, and refreshes stack descriptions
 - `land` sets Azure DevOps auto-complete on the bottom PR of the stack with squash merge and source-branch deletion enabled
 - `sync --all` reconciles tracked PRs before planning rebases; use `--no-pr` to skip Azure DevOps calls
-- `sync --all --push` force-pushes rebased branches with lease so their PRs update after restacking
+- `sync --all --push` force-pushes active tracked branches with lease so their PRs update after restacking
 
 ## Safety rules
 

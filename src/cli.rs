@@ -100,7 +100,7 @@ pub struct SyncArgs {
     pub dry_run: bool,
     #[arg(
         long,
-        help = "Force-push rebased branches (with lease) to update their PRs"
+        help = "Force-push active tracked branches (with lease) to update their PRs"
     )]
     pub push: bool,
     #[arg(long, help = "Skip Azure DevOps PR reconciliation")]
