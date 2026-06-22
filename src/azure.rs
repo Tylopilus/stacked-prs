@@ -12,12 +12,14 @@ use crate::state::{BranchStatus, PullRequestRef, RepoState};
 const STACK_BEGIN: &str = "<!-- stack:begin -->";
 const STACK_END: &str = "<!-- stack:end -->";
 const PROVIDER: &str = "azure-devops";
+const AZURE_DEVOPS_RESOURCE: &str = "499b84ac-1321-427f-aa17-267ca6975798";
 
 /// Subset of the JSON returned by `az repos pr show/create -o json`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PrInfo {
     pub pull_request_id: u64,
+    pub url: Option<String>,
     /// "active" | "completed" | "abandoned"
     pub status: String,
     pub target_ref_name: String,
@@ -36,6 +38,7 @@ pub struct Reviewer {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RepoInfo {
+    pub url: Option<String>,
     pub web_url: Option<String>,
 }
 
@@ -50,10 +53,35 @@ impl PrInfo {
     pub fn target_branch(&self) -> &str {
         strip_ref(&self.target_ref_name)
     }
+
+    fn api_url(&self) -> Result<String> {
+        if let Some(url) = &self.url {
+            return Ok(url.clone());
+        }
+        let repo_url = self
+            .repository
+            .as_ref()
+            .and_then(|repo| repo.url.as_ref())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "cannot retarget PR !{}: az output did not include REST URL metadata",
+                    self.pull_request_id
+                )
+            })?;
+        Ok(format!("{repo_url}/pullRequests/{}", self.pull_request_id))
+    }
 }
 
 fn strip_ref(name: &str) -> &str {
     name.strip_prefix("refs/heads/").unwrap_or(name)
+}
+
+fn branch_ref(name: &str) -> String {
+    if name.starts_with("refs/heads/") {
+        name.to_string()
+    } else {
+        format!("refs/heads/{name}")
+    }
 }
 
 /// Thin wrapper around the `az` CLI, run from the repository root so that
@@ -118,15 +146,21 @@ impl<'a> AzCli<'a> {
         Ok(())
     }
 
-    pub fn pr_retarget(&self, id: &str, target: &str) -> Result<()> {
+    pub fn pr_retarget(&self, info: &PrInfo, target: &str) -> Result<()> {
+        let body = serde_json::json!({ "targetRefName": branch_ref(target) }).to_string();
+        let url = format!("{}?api-version=7.1", info.api_url()?);
         self.az(&[
-            "repos",
-            "pr",
-            "update",
-            "--id",
-            id,
-            "--target-branch",
-            target,
+            "rest",
+            "--resource",
+            AZURE_DEVOPS_RESOURCE,
+            "--method",
+            "PATCH",
+            "--url",
+            url.as_str(),
+            "--body",
+            body.as_str(),
+            "--headers",
+            "Content-Type=application/json",
             "-o",
             "none",
         ])?;
@@ -227,13 +261,13 @@ pub fn pr_create(
     Ok(())
 }
 
-/// `stack pr sync`: reconcile local stack state with Azure DevOps and refresh
-/// the stack overview block in every open PR description.
+/// `stack pr sync`: reconcile PR completion/abandonment with local state and
+/// refresh the stack overview block in every open PR description.
 pub fn pr_sync(repo: &GitRepo) -> Result<()> {
     let mut state = RepoState::load(&repo.root)?;
     state.validate_metadata(repo)?;
     let az = AzCli::new(repo);
-    let changed = reconcile(&az, &mut state, true)?;
+    let changed = reconcile_statuses(&az, &mut state)?;
     if changed {
         state.save(&repo.root)?;
     }
@@ -252,6 +286,21 @@ pub fn pr_sync(repo: &GitRepo) -> Result<()> {
 ///
 /// Returns whether state changed. The caller decides when to save.
 pub fn reconcile(az: &AzCli, state: &mut RepoState, apply_remote: bool) -> Result<bool> {
+    reconcile_inner(az, state, apply_remote, true)
+}
+
+/// Reconcile only PR statuses. This is used before rebase planning so completed
+/// lower-stack PRs redirect effective parents without retargeting children yet.
+pub fn reconcile_statuses(az: &AzCli, state: &mut RepoState) -> Result<bool> {
+    reconcile_inner(az, state, false, false)
+}
+
+fn reconcile_inner(
+    az: &AzCli,
+    state: &mut RepoState,
+    apply_remote: bool,
+    retarget_prs: bool,
+) -> Result<bool> {
     let mut changed = false;
     let mut infos: BTreeMap<String, PrInfo> = BTreeMap::new();
 
@@ -293,30 +342,32 @@ pub fn reconcile(az: &AzCli, state: &mut RepoState, apply_remote: bool) -> Resul
         }
     }
 
-    // Retarget pass, after merged statuses settled so effective parents are final.
-    for (name, info) in &infos {
-        let branch = state.branch(name).expect("tracked branch present in state");
-        if branch.status != BranchStatus::Active {
-            continue;
-        }
-        let expected = effective_parent(state, branch);
-        let actual = info.target_branch().to_string();
-        let pr_id = info.pull_request_id.to_string();
-        if actual != expected {
-            if apply_remote {
-                az.pr_retarget(&pr_id, &expected)?;
-                println!("Retargeted PR !{pr_id} ({name}): {actual} -> {expected}");
-            } else {
-                println!("Would retarget PR !{pr_id} ({name}): {actual} -> {expected}");
+    if retarget_prs {
+        // Retarget pass, after merged statuses settled so effective parents are final.
+        for (name, info) in &infos {
+            let branch = state.branch(name).expect("tracked branch present in state");
+            if branch.status != BranchStatus::Active {
+                continue;
             }
-        }
-        let branch = state
-            .branch_mut(name)
-            .expect("tracked branch present in state");
-        let pr = branch.pr.as_mut().expect("PR ref present");
-        if pr.target_branch.as_deref() != Some(expected.as_str()) {
-            pr.target_branch = Some(expected);
-            changed = true;
+            let expected = effective_parent(state, branch);
+            let actual = info.target_branch().to_string();
+            let pr_id = info.pull_request_id.to_string();
+            if actual != expected {
+                if apply_remote {
+                    az.pr_retarget(info, &expected)?;
+                    println!("Retargeted PR !{pr_id} ({name}): {actual} -> {expected}");
+                } else {
+                    println!("Would retarget PR !{pr_id} ({name}): {actual} -> {expected}");
+                }
+            }
+            let branch = state
+                .branch_mut(name)
+                .expect("tracked branch present in state");
+            let pr = branch.pr.as_mut().expect("PR ref present");
+            if pr.target_branch.as_deref() != Some(expected.as_str()) {
+                pr.target_branch = Some(expected);
+                changed = true;
+            }
         }
     }
 

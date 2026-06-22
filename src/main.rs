@@ -47,7 +47,14 @@ fn run() -> Result<()> {
             rebase_branch(&repo, &args.branch, args.onto.as_deref(), args.dry_run)
         }
         Command::Reparent(args) => reparent(&repo, args),
-        Command::Sync(args) => sync_all(&repo, args.all, args.dry_run, args.push, args.no_pr),
+        Command::Sync(args) => sync_all(
+            &repo,
+            args.all,
+            args.continue_sync,
+            args.dry_run,
+            args.push,
+            args.no_pr,
+        ),
         Command::MarkMerged(args) => mark_merged(&repo, args.branch.as_deref()),
         Command::Pr(args) => match args.command {
             cli::PrCommand::Create(args) => {

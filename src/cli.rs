@@ -94,8 +94,13 @@ pub struct ReparentArgs {
 
 #[derive(Args, Debug)]
 pub struct SyncArgs {
-    #[arg(long, help = "Sync every tracked branch")]
+    #[arg(
+        long,
+        help = "Accepted for compatibility; sync always processes the stack"
+    )]
     pub all: bool,
+    #[arg(long = "continue", help = "Continue a conflicted stack sync rebase")]
+    pub continue_sync: bool,
     #[arg(long, help = "Print planned rebases without running them")]
     pub dry_run: bool,
     #[arg(

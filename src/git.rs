@@ -1,3 +1,4 @@
+use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -105,12 +106,69 @@ impl GitRepo {
         self.run(&["rebase", "--continue"])
     }
 
+    pub fn add_paths(&self, paths: &[String]) -> Result<()> {
+        if paths.is_empty() {
+            return Ok(());
+        }
+        let mut args = vec!["add", "--"];
+        args.extend(paths.iter().map(String::as_str));
+        self.run(&args)
+    }
+
     pub fn rebase_abort(&self) -> Result<()> {
         self.run(&["rebase", "--abort"])
     }
 
     pub fn is_rebase_in_progress(&self) -> Result<bool> {
         Ok(self.git_path("rebase-merge")?.exists() || self.git_path("rebase-apply")?.exists())
+    }
+
+    pub fn rebase_branch_and_onto(&self) -> Result<Option<(String, String)>> {
+        for dir_name in ["rebase-merge", "rebase-apply"] {
+            let dir = self.git_path(dir_name)?;
+            if !dir.exists() {
+                continue;
+            }
+            let head_name = fs::read_to_string(dir.join("head-name"))?
+                .trim()
+                .to_string();
+            let branch = head_name
+                .strip_prefix("refs/heads/")
+                .unwrap_or(&head_name)
+                .to_string();
+            let onto = fs::read_to_string(dir.join("onto"))?.trim().to_string();
+            return Ok(Some((branch, onto)));
+        }
+        Ok(None)
+    }
+
+    pub fn unmerged_paths(&self) -> Result<Vec<String>> {
+        let output = self.git(&["diff", "--name-only", "--diff-filter=U"])?;
+        Ok(output
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(ToOwned::to_owned)
+            .collect())
+    }
+
+    pub fn paths_with_conflict_markers(&self, paths: &[String]) -> Result<Vec<String>> {
+        let mut unresolved = Vec::new();
+        for path in paths {
+            let full_path = self.root.join(path);
+            let Ok(contents) = fs::read_to_string(&full_path) else {
+                unresolved.push(path.clone());
+                continue;
+            };
+            if contents.lines().any(|line| {
+                line.starts_with("<<<<<<< ")
+                    || line.starts_with("=======")
+                    || line.starts_with(">>>>>>> ")
+            }) {
+                unresolved.push(path.clone());
+            }
+        }
+        Ok(unresolved)
     }
 
     pub fn branch_tip(&self, branch: &str) -> Result<String> {
