@@ -175,6 +175,10 @@ impl GitRepo {
         self.rev_parse(branch)
     }
 
+    pub fn is_ancestor(&self, ancestor: &str, descendant: &str) -> Result<bool> {
+        self.run_status(&["merge-base", "--is-ancestor", ancestor, descendant])
+    }
+
     pub fn push(&self, remote: &str, branch: &str, force_with_lease: bool) -> Result<()> {
         if force_with_lease {
             self.run(&[

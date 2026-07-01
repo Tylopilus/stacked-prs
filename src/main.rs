@@ -11,6 +11,7 @@ mod sync;
 
 use anyhow::Result;
 use clap::Parser;
+use clap_complete::generate;
 use std::env;
 use std::io::{self, Write};
 
@@ -35,10 +36,16 @@ fn main() {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
+    let command = cli.command;
+    let command = match command {
+        Command::Completions(args) => return completions(args.shell),
+        command => command,
+    };
+
     let root = env::current_dir()?;
     let repo = GitRepo::discover(root)?;
 
-    match cli.command {
+    match command {
         Command::Init(args) => init(&repo, args),
         Command::Status(args) => status(&repo, args.json),
         Command::Create(args) => create(&repo, args),
@@ -50,6 +57,7 @@ fn run() -> Result<()> {
         Command::Sync(args) => sync_all(
             &repo,
             args.all,
+            args.from.as_deref(),
             args.continue_sync,
             args.dry_run,
             args.push,
@@ -65,7 +73,14 @@ fn run() -> Result<()> {
         Command::Land(args) => azure::land(&repo, args.branch),
         Command::Cleanup(args) => cleanup(&repo, args.dry_run),
         Command::Doctor => doctor(&repo),
+        Command::Completions(_) => unreachable!("handled before repository discovery"),
     }
+}
+
+fn completions(shell: clap_complete::Shell) -> Result<()> {
+    let mut command = Cli::command_for_completions();
+    generate(shell, &mut command, "stacked-prs", &mut io::stdout());
+    Ok(())
 }
 
 fn init(repo: &GitRepo, args: cli::InitArgs) -> Result<()> {

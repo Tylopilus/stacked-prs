@@ -32,13 +32,14 @@ stacked-prs rebase <branch> [--onto <branch>] [--dry-run]
 stacked-prs reparent <branch> --parent <branch> [--no-rebase] [--dry-run]
 stacked-prs reparent --continue
 stacked-prs reparent --abort
-stacked-prs sync --all [--dry-run] [--push] [--no-pr]
+stacked-prs sync --all [--from <branch>] [--dry-run] [--push] [--no-pr]
 stacked-prs mark-merged [branch]
 stacked-prs pr create [branch] [--title <title>] [--draft]
 stacked-prs pr sync
 stacked-prs land [branch]
 stacked-prs cleanup [--dry-run]
 stacked-prs doctor
+stacked-prs completions <shell>
 ```
 
 `init` is optional. The first `create` or `track` auto-initializes the repo with trunk `develop` and remote `origin` if no stack state exists yet.
@@ -91,6 +92,7 @@ stacked-prs sync --all --push
 - `pr sync` reconciles tracked PRs with Azure DevOps, marks completed PRs as merged, drops abandoned PR references, retargets active PRs when their expected parent changes, and refreshes stack descriptions
 - `land` sets Azure DevOps auto-complete on the bottom PR of the stack with squash merge and source-branch deletion enabled
 - `sync --all` reconciles tracked PRs before planning rebases; use `--no-pr` to skip Azure DevOps calls
+- `sync --from <branch>` rebases only descendants of that branch and leaves the branch itself plus lower stack branches untouched
 - `sync --all --push` force-pushes active tracked branches with lease so their PRs update after restacking
 
 ## Safety rules
@@ -99,6 +101,16 @@ stacked-prs sync --all --push
 - `sync --push` uses `--force-with-lease`
 - `create` checks out the new branch immediately
 - `cleanup` only deletes merged leaf branches and never deletes the current branch
+
+## Shell Completions
+
+Generate completions for your shell:
+
+```bash
+stacked-prs completions zsh > ~/.zfunc/_stacked-prs
+```
+
+Supported shells are `bash`, `elvish`, `fish`, `powershell`, and `zsh`.
 
 ## Development
 

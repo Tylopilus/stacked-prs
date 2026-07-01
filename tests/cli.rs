@@ -328,6 +328,82 @@ fn sync_rebases_child_after_parent_squash_merge() {
 }
 
 #[test]
+fn sync_from_rebases_only_descendants() {
+    let repo = setup_repo();
+    run_stack(repo.path(), &["create", "feature/a"]).success();
+    write_and_commit(repo.path(), "a.txt", "from a\n", "feature a change");
+
+    run_stack(repo.path(), &["create", "feature/b"]).success();
+    write_and_commit(repo.path(), "b.txt", "from b\n", "feature b change");
+
+    run_stack(repo.path(), &["create", "feature/c"]).success();
+    write_and_commit(repo.path(), "c.txt", "from c\n", "feature c change");
+
+    let feature_a_before = git_output(repo.path(), &["rev-parse", "feature/a"]);
+
+    run_git(repo.path(), &["checkout", "feature/b"]);
+    write_and_commit(
+        repo.path(),
+        "b2.txt",
+        "from b2\n",
+        "feature b second change",
+    );
+
+    run_stack(repo.path(), &["sync", "--from", "feature/b"])
+        .success()
+        .stdout(predicates::str::contains("rebase feature/c"));
+
+    assert_eq!(
+        feature_a_before,
+        git_output(repo.path(), &["rev-parse", "feature/a"])
+    );
+    assert_eq!(
+        git_output(repo.path(), &["rev-parse", "feature/b"]),
+        git_output(repo.path(), &["merge-base", "feature/b", "feature/c"])
+    );
+}
+
+#[test]
+fn sync_records_externally_completed_rebase() {
+    let repo = setup_repo();
+    run_stack(repo.path(), &["create", "feature/a"]).success();
+    write_and_commit(repo.path(), "a.txt", "from a\n", "feature a change");
+
+    run_stack(repo.path(), &["create", "feature/b"]).success();
+    write_and_commit(repo.path(), "b.txt", "from b\n", "feature b change");
+
+    run_git(repo.path(), &["checkout", "feature/a"]);
+    write_and_commit(
+        repo.path(),
+        "a2.txt",
+        "from a2\n",
+        "feature a second change",
+    );
+
+    run_git(repo.path(), &["checkout", "feature/b"]);
+    run_git(repo.path(), &["rebase", "feature/a"]);
+
+    run_stack(repo.path(), &["sync", "--from", "feature/a"])
+        .success()
+        .stdout(predicates::str::contains(
+            "Recorded completed rebase for feature/b",
+        ));
+
+    run_stack(repo.path(), &["sync", "--from", "feature/a"])
+        .success()
+        .stdout(predicates::str::contains(
+            "All descendants of feature/a are up to date",
+        ));
+}
+
+#[test]
+fn completions_generate_sync_from_flag() {
+    run_stack(Path::new("/"), &["completions", "zsh"])
+        .success()
+        .stdout(predicates::str::contains("--from"));
+}
+
+#[test]
 fn sync_push_pushes_active_branch_without_rebase_plan() {
     let repo = setup_repo();
     let remote = TempDir::new().unwrap();

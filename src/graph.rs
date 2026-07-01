@@ -86,6 +86,24 @@ pub fn descendants_topo<'a>(state: &'a RepoState) -> Result<Vec<&'a str>> {
     Ok(ordered)
 }
 
+pub fn descendants_of<'a>(state: &'a RepoState, parent: &str) -> Result<Vec<&'a str>> {
+    if parent != state.repo.trunk && state.branch(parent).is_none() {
+        return Err(crate::error::StackError::InvalidGraph(format!(
+            "branch is not tracked: {parent}"
+        ))
+        .into());
+    }
+
+    let graph = build(state)?;
+    let mut ordered = Vec::new();
+    if let Some(children) = graph.children.get(parent) {
+        for child in children {
+            visit(child, &graph, &mut ordered);
+        }
+    }
+    Ok(ordered)
+}
+
 fn visit<'a>(branch: &'a str, graph: &StackGraph<'a>, ordered: &mut Vec<&'a str>) {
     ordered.push(branch);
     if let Some(children) = graph.children.get(branch) {

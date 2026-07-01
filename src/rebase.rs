@@ -82,6 +82,16 @@ pub fn rebase_branch(
         return Ok(());
     }
 
+    if repo.is_ancestor(&plan.new_base, &plan.branch)? {
+        let branch = state
+            .branch_mut(&plan.branch)
+            .ok_or_else(|| anyhow::anyhow!("branch disappeared from state: {}", plan.branch))?;
+        branch.recorded_parent_tip = plan.new_base;
+        state.save(&repo.root)?;
+        println!("Recorded completed rebase for {}", plan.branch);
+        return Ok(());
+    }
+
     repo.rebase_onto(&plan.new_base, &plan.old_base, &plan.branch)?;
 
     let branch = state

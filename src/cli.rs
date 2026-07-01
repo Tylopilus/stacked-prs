@@ -1,4 +1,5 @@
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, Parser, Subcommand};
+use clap_complete::Shell;
 
 #[derive(Parser, Debug)]
 #[command(name = "stack")]
@@ -34,6 +35,14 @@ pub enum Command {
     Cleanup(CleanupArgs),
     #[command(about = "Check repository and stack metadata health")]
     Doctor,
+    #[command(about = "Generate shell completions")]
+    Completions(CompletionsArgs),
+}
+
+impl Cli {
+    pub fn command_for_completions() -> clap::Command {
+        Self::command()
+    }
 }
 
 #[derive(Args, Debug)]
@@ -99,6 +108,11 @@ pub struct SyncArgs {
         help = "Accepted for compatibility; sync always processes the stack"
     )]
     pub all: bool,
+    #[arg(
+        long,
+        help = "Only sync descendants of this tracked branch; the branch itself is left untouched"
+    )]
+    pub from: Option<String>,
     #[arg(long = "continue", help = "Continue a conflicted stack sync rebase")]
     pub continue_sync: bool,
     #[arg(long, help = "Print planned rebases without running them")]
@@ -157,4 +171,10 @@ pub struct MarkMergedArgs {
 pub struct CleanupArgs {
     #[arg(long, help = "Print cleanup candidates without deleting or pruning")]
     pub dry_run: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct CompletionsArgs {
+    #[arg(help = "Shell to generate completions for")]
+    pub shell: Shell,
 }

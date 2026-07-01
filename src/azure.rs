@@ -403,7 +403,8 @@ pub fn update_stack_descriptions(az: &AzCli, state: &RepoState) -> Result<()> {
     }
 
     for (name, info) in &infos {
-        let block = build_stack_block(state, &order, &infos, name);
+        let stack_order = stack_order_for_branch(state, &order, name);
+        let block = build_stack_block(state, &stack_order, &infos, name);
         let description = splice_block(info.description.as_deref().unwrap_or(""), &block);
         az.pr_update_description(&info.pull_request_id.to_string(), &description)?;
     }
@@ -411,6 +412,45 @@ pub fn update_stack_descriptions(az: &AzCli, state: &RepoState) -> Result<()> {
         println!("Updated stack description on {} PR(s)", infos.len());
     }
     Ok(())
+}
+
+fn stack_order_for_branch(state: &RepoState, order: &[String], current: &str) -> Vec<String> {
+    let root = stack_root(state, current);
+    order
+        .iter()
+        .filter(|name| branch_is_in_stack(state, name, &root))
+        .cloned()
+        .collect()
+}
+
+fn stack_root(state: &RepoState, current: &str) -> String {
+    let mut root = current.to_string();
+    loop {
+        let Some(branch) = state.branch(&root) else {
+            break;
+        };
+        if state.branch(&branch.parent).is_none() {
+            break;
+        }
+        root = branch.parent.clone();
+    }
+    root
+}
+
+fn branch_is_in_stack(state: &RepoState, name: &str, root: &str) -> bool {
+    let mut candidate = name;
+    loop {
+        if candidate == root {
+            return true;
+        }
+        let Some(branch) = state.branch(candidate) else {
+            return false;
+        };
+        if state.branch(&branch.parent).is_none() {
+            return false;
+        }
+        candidate = &branch.parent;
+    }
 }
 
 fn build_stack_block(
@@ -604,6 +644,54 @@ mod tests {
         assert_eq!(
             replaced,
             "My PR description\n\n<!-- stack:begin -->v2<!-- stack:end -->"
+        );
+    }
+
+    #[test]
+    fn stack_order_excludes_unrelated_roots() {
+        let mut state = RepoState::new("develop".to_string(), "origin".to_string());
+        state
+            .add_branch(crate::state::ManagedBranch::new(
+                "feature/a".to_string(),
+                "develop".to_string(),
+                "base".to_string(),
+            ))
+            .unwrap();
+        state
+            .add_branch(crate::state::ManagedBranch::new(
+                "feature/b".to_string(),
+                "feature/a".to_string(),
+                "a".to_string(),
+            ))
+            .unwrap();
+        state
+            .add_branch(crate::state::ManagedBranch::new(
+                "other/a".to_string(),
+                "develop".to_string(),
+                "base".to_string(),
+            ))
+            .unwrap();
+        state
+            .add_branch(crate::state::ManagedBranch::new(
+                "other/b".to_string(),
+                "other/a".to_string(),
+                "other-a".to_string(),
+            ))
+            .unwrap();
+
+        let order: Vec<String> = graph::descendants_topo(&state)
+            .unwrap()
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+
+        assert_eq!(
+            stack_order_for_branch(&state, &order, "feature/b"),
+            vec!["feature/a".to_string(), "feature/b".to_string()]
+        );
+        assert_eq!(
+            stack_order_for_branch(&state, &order, "other/a"),
+            vec!["other/a".to_string(), "other/b".to_string()]
         );
     }
 

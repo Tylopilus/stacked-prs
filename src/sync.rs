@@ -10,6 +10,7 @@ use crate::state::{BranchStatus, RepoState};
 pub fn sync_all(
     repo: &GitRepo,
     _all: bool,
+    from: Option<&str>,
     continue_sync: bool,
     dry_run: bool,
     push: bool,
@@ -24,7 +25,7 @@ pub fn sync_all(
 
     let starting_branch = repo.current_branch()?;
 
-    if repo.fetch(&state.repo.remote).is_err() {
+    if from.is_none() && repo.fetch(&state.repo.remote).is_err() {
         println!("Fetch failed; continuing with local refs only");
     }
 
@@ -33,7 +34,7 @@ pub fn sync_all(
     // manual `stack mark-merged`. Do not retarget PRs yet; children must be
     // rebased and pushed first or Azure shows the merged lower-stack diff again.
     let has_prs = state.branches.iter().any(|branch| branch.pr.is_some());
-    if !no_pr && has_prs {
+    if from.is_none() && !no_pr && has_prs {
         let az = AzCli::new(repo);
         let mut reconciled_state = state.clone();
         match azure::reconcile_statuses(&az, &mut reconciled_state) {
@@ -49,10 +50,14 @@ pub fn sync_all(
         }
     }
 
-    let branch_order: Vec<String> = graph::descendants_topo(&state)?
-        .iter()
-        .map(|branch| (*branch).to_string())
-        .collect();
+    let branch_order: Vec<String> = if let Some(from) = from {
+        graph::descendants_of(&state, from)?
+    } else {
+        graph::descendants_topo(&state)?
+    }
+    .iter()
+    .map(|branch| (*branch).to_string())
+    .collect();
 
     if dry_run {
         let mut plans = Vec::<RebasePlan>::new();
@@ -68,7 +73,11 @@ pub fn sync_all(
             }
         }
         if plans.is_empty() {
-            println!("All tracked branches are up to date");
+            if let Some(from) = from {
+                println!("All descendants of {from} are up to date");
+            } else {
+                println!("All tracked branches are up to date");
+            }
         } else {
             for plan in &plans {
                 output::print_rebase_plan(plan);
@@ -87,6 +96,15 @@ pub fn sync_all(
         }
         if let Some(plan) = plan_rebase(repo, &state, branch_name, None)? {
             output::print_rebase_plan(&plan);
+            if repo.is_ancestor(&plan.new_base, &plan.branch)? {
+                let branch = state.branch_mut(&plan.branch).ok_or_else(|| {
+                    anyhow::anyhow!("branch disappeared from state: {}", plan.branch)
+                })?;
+                branch.recorded_parent_tip = plan.new_base.clone();
+                state.save(&repo.root)?;
+                println!("Recorded completed rebase for {}", plan.branch);
+                continue;
+            }
             repo.rebase_onto(&plan.new_base, &plan.old_base, &plan.branch)?;
             let branch = state
                 .branch_mut(&plan.branch)
@@ -98,7 +116,11 @@ pub fn sync_all(
     }
 
     if !rebased {
-        println!("All tracked branches are up to date");
+        if let Some(from) = from {
+            println!("All descendants of {from} are up to date");
+        } else {
+            println!("All tracked branches are up to date");
+        }
         if !push {
             return Ok(());
         }
@@ -109,7 +131,10 @@ pub fn sync_all(
     }
 
     if push {
-        for branch in &state.branches {
+        for branch_name in &branch_order {
+            let branch = state
+                .branch(branch_name)
+                .ok_or_else(|| anyhow::anyhow!("branch disappeared from state: {branch_name}"))?;
             if branch.status != BranchStatus::Active {
                 continue;
             }
@@ -119,7 +144,7 @@ pub fn sync_all(
     }
 
     // Now that rebased branches have been pushed, it is safe to retarget PRs.
-    if !no_pr && has_prs && !dry_run {
+    if from.is_none() && !no_pr && has_prs && !dry_run {
         let az = AzCli::new(repo);
         if let Err(err) = azure::reconcile(&az, &mut state, true) {
             println!("Warning: PR retargeting failed ({err:#}); continuing")
@@ -129,22 +154,24 @@ pub fn sync_all(
     }
 
     // Refresh the stack overview block in PR descriptions after restacking.
-    if !no_pr && has_prs {
+    if from.is_none() && !no_pr && has_prs {
         let az = AzCli::new(repo);
         if let Err(err) = azure::update_stack_descriptions(&az, &state) {
             println!("Warning: failed to update PR descriptions: {err:#}");
         }
     }
 
-    let trunk = &state.repo.trunk;
-    let remote_trunk = format!("origin/{}", trunk);
-    if repo.branch_exists(&remote_trunk)? {
-        let local_tip = repo.branch_tip(trunk)?;
-        let remote_tip = repo.branch_tip(&remote_trunk)?;
-        if local_tip != remote_tip {
-            println!(
-                "Tip: local {trunk} is behind {remote_trunk}. Run 'git checkout {trunk} && git pull' to update."
-            );
+    if from.is_none() {
+        let trunk = &state.repo.trunk;
+        let remote_trunk = format!("origin/{}", trunk);
+        if repo.branch_exists(&remote_trunk)? {
+            let local_tip = repo.branch_tip(trunk)?;
+            let remote_tip = repo.branch_tip(&remote_trunk)?;
+            if local_tip != remote_tip {
+                println!(
+                    "Tip: local {trunk} is behind {remote_trunk}. Run 'git checkout {trunk} && git pull' to update."
+                );
+            }
         }
     }
 
@@ -194,5 +221,5 @@ fn sync_continue(repo: &GitRepo, push: bool, no_pr: bool) -> Result<()> {
     state.save(&repo.root)?;
     println!("Recorded completed rebase for {branch_name}");
 
-    sync_all(repo, true, false, false, push, no_pr)
+    sync_all(repo, true, None, false, false, push, no_pr)
 }
