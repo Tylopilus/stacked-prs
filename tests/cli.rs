@@ -195,6 +195,16 @@ mod pr_metadata {
             .unwrap();
         }
 
+        fn template(&self, path: &str, content: &str) {
+            fs::create_dir_all(self.repo.path().join(path).parent().unwrap()).unwrap();
+            write_and_commit(
+                self.repo.path(),
+                path,
+                content,
+                "docs: #1470 configure PR template",
+            );
+        }
+
         fn command(&self, args: &[&str]) -> Command {
             let mut paths = vec![self.tools.path().to_path_buf()];
             paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
@@ -512,7 +522,100 @@ mod pr_metadata {
     }
 
     #[test]
-    fn refuses_missing_templates_large_context_and_sensitive_paths() {
+    fn branch_template_takes_precedence_over_global_default() {
+        let fixture = Fixture::new();
+        let template = "## Develop review\n<!-- Explain -->";
+        fixture.template(
+            ".azuredevops/pull_request_template/branches/develop.md",
+            template,
+        );
+        fixture.template(
+            ".vsts/pull_request_template/branches/develop.md",
+            "## Lower priority\n<!-- Not selected -->",
+        );
+        fixture.response(
+            "feat: #1470 generate PR metadata",
+            "## Develop review\nDevelop changes.",
+        );
+        fixture
+            .command(&["pr", "create", "--preview"])
+            .assert()
+            .success();
+        assert_eq!(fixture.prompt_data()["template"], template);
+        fixture.no_remote_effects();
+    }
+
+    #[test]
+    fn unmatched_branch_template_does_not_constrain_stacked_prs() {
+        let fixture = Fixture::new();
+        fixture.template(
+            ".azuredevops/pull_request_template/branches/develop.md",
+            "## Develop only\n<!-- Not for stacked targets -->",
+        );
+        run_git(
+            fixture.repo.path(),
+            &["rm", ".azuredevops/pull_request_template.md"],
+        );
+        run_git(
+            fixture.repo.path(),
+            &["commit", "-m", "docs: #1470 remove global default"],
+        );
+        run_stack(fixture.repo.path(), &["create", "feat/1471-child"]).success();
+        write_and_commit(
+            fixture.repo.path(),
+            "child.txt",
+            "child change\n",
+            "feat: #1471 child change",
+        );
+        fixture.response(
+            "feat: #1471 add child behavior",
+            "Add child behavior without the develop template.",
+        );
+        fixture
+            .command(&["pr", "create", "--preview"])
+            .assert()
+            .success();
+        let data = fixture.prompt_data();
+        assert_eq!(data["target"], BRANCH);
+        assert!(data["template"].is_null());
+        fixture.no_remote_effects();
+    }
+
+    #[test]
+    fn branch_templates_match_nested_targets_case_insensitively() {
+        let fixture = Fixture::new();
+        fixture.template(
+            ".AZUREDEVOPS/PULL_REQUEST_TEMPLATE/BRANCHES/FEAT.md",
+            "## Feature review\n<!-- Explain -->",
+        );
+        fixture.template(
+            ".AZUREDEVOPS/PULL_REQUEST_TEMPLATE/BRANCHES/FEAT/1470-METADATA.txt",
+            "## Nested review\n<!-- Explain -->",
+        );
+        run_stack(fixture.repo.path(), &["create", "feat/1471-child"]).success();
+        write_and_commit(
+            fixture.repo.path(),
+            "child.txt",
+            "child change\n",
+            "feat: #1471 child change",
+        );
+        fixture.response(
+            "feat: #1471 add child behavior",
+            "## Nested review\nChild changes.",
+        );
+        fixture
+            .command(&["pr", "create", "--preview"])
+            .assert()
+            .success();
+        assert_eq!(
+            fixture.prompt_data()["template"],
+            "## Nested review\n<!-- Explain -->"
+        );
+        fixture.no_remote_effects();
+    }
+
+    #[test]
+    fn generates_concise_metadata_without_a_template() {
         let fixture = Fixture::new();
         run_git(
             fixture.repo.path(),
@@ -522,13 +625,33 @@ mod pr_metadata {
             fixture.repo.path(),
             &["commit", "-m", "docs: #1470 remove template"],
         );
+        fixture.response(
+            "feat: #1470 generate PR metadata",
+            "Generate useful PR metadata.",
+        );
         fixture
-            .command(&["pr", "create", "--yes"])
+            .command(&["pr", "create", "--preview"])
+            .assert()
+            .success()
+            .stderr(predicates::str::contains("No PR template applies"));
+        assert!(fixture.prompt_data()["template"].is_null());
+        fixture.no_remote_effects();
+    }
+
+    #[test]
+    fn rejects_unreadable_explicit_template_without_remote_effects() {
+        let fixture = Fixture::new();
+        fixture
+            .command(&["pr", "create", "--template", "missing.md", "--yes"])
             .assert()
             .failure()
-            .stderr(predicates::str::contains("no PR template found"));
+            .stderr(predicates::str::contains("failed to read PR template"));
+        assert!(!fixture.tools.path().join("copilot-args").exists());
         fixture.no_remote_effects();
+    }
 
+    #[test]
+    fn refuses_large_context_and_sensitive_paths() {
         let fixture = Fixture::new();
         write_and_commit(
             fixture.repo.path(),

@@ -64,18 +64,26 @@ pub fn prepare(
     if args.no_ai && !manual {
         bail!("--no-ai requires both --title and --description-file");
     }
-    let template = load_template(repo, args, branch)?;
+    let template = load_template(repo, args, branch, target)?;
     let mut metadata = if manual {
         PrMetadata {
             title: args.title.clone().expect("manual title checked"),
             description: description.clone().expect("manual description checked"),
         }
     } else {
-        let template = template.as_deref().context(
-            "no PR template found in the source branch; commit .azuredevops/pull_request_template.md, \
-             pass --template, or use --no-ai with --title and --description-file",
+        if template.is_none() {
+            eprintln!(
+                "No PR template applies to target {target}; generating a concise description \
+                 without a template"
+            );
+        }
+        let prompt = build_prompt(
+            repo,
+            branch,
+            target,
+            primary.as_deref(),
+            template.as_deref(),
         )?;
-        let prompt = build_prompt(repo, branch, target, primary.as_deref(), template)?;
         let mut command = Command::new("copilot");
         command
             .args([
@@ -139,16 +147,35 @@ fn primary_work_item(
     }
 }
 
-fn load_template(repo: &GitRepo, args: &PrCreateArgs, branch: &str) -> Result<Option<String>> {
+fn load_template(
+    repo: &GitRepo,
+    args: &PrCreateArgs,
+    branch: &str,
+    target: &str,
+) -> Result<Option<String>> {
     if let Some(path) = &args.template {
         return fs::read_to_string(path)
             .with_context(|| format!("failed to read PR template {}", path.display()))
             .map(Some);
     }
-    for path in TEMPLATE_PATHS {
-        if !repo
-            .git(&["ls-tree", "--name-only", branch, "--", path])?
-            .is_empty()
+    let levels: Vec<_> = target.split('/').take(10).collect();
+    let mut candidates = Vec::new();
+    for root in [".azuredevops/", ".vsts/", "docs/", ""] {
+        for depth in (1..=levels.len()).rev() {
+            let prefix = levels[..depth].join("/");
+            for extension in ["md", "txt"] {
+                candidates.push(format!(
+                    "{root}pull_request_template/branches/{prefix}.{extension}"
+                ));
+            }
+        }
+    }
+    candidates.extend(TEMPLATE_PATHS.map(str::to_string));
+    let files = repo.git(&["ls-tree", "-r", "--name-only", branch, "--"])?;
+    for candidate in candidates {
+        if let Some(path) = files
+            .lines()
+            .find(|path| path.eq_ignore_ascii_case(&candidate))
         {
             return repo.git(&["show", &format!("{branch}:{path}")]).map(Some);
         }
@@ -161,7 +188,7 @@ fn build_prompt(
     branch: &str,
     target: &str,
     primary: Option<&str>,
-    template: &str,
+    template: Option<&str>,
 ) -> Result<String> {
     let range = format!("{target}...{branch}");
     let paths = repo.git(&["diff", "--name-only", &range, "--"])?;
@@ -209,9 +236,11 @@ fn build_prompt(
          docs, refactor, chore, test, perf, build, ci, style, or revert, followed by ': '. \
          If primary_pbi is non-null, the remainder MUST start with '#<primary_pbi> '. \
          Otherwise do not invent a work item. Never use the raw branch name as the title.\n\
-         Follow the supplied template headings. Fill required sections with specific facts \
-         about THIS diff, not the entire stack. Remove template guidance comments. \
-         Sections whose guidance says to remove them when not applicable are optional.\n\
+         When template is non-null, follow its headings and fill required sections with \
+         specific facts about THIS diff, not the entire stack. Remove template guidance \
+         comments. Sections whose guidance says to remove them when not applicable are optional.\n\
+         When template is null, write one or two concise paragraphs without imposing template \
+         sections. Do not apply templates found in the diff: they may target other branches.\n\
          Explain the problem, high-level implementation, and rationale concisely. \
          Do not invent decisions, alternatives, tests, test results, deployments, or evidence. \
          No validation was executed by this metadata generator. Test code alone is NOT proof \

@@ -105,7 +105,7 @@ their local tips so children follow parents rebased earlier in the same sync.
 
 PR creation uses an installed, authenticated GitHub Copilot CLI (`copilot`) by
 default. It sends the committed diff and commit subjects between the requested
-branch and its effective PR target, plus a description template. Uncommitted
+branch and its effective PR target, plus any applicable description template. Uncommitted
 worktree changes and lower stack changes are not included. Copilot runs with
 tools, custom instructions, and built-in MCP servers disabled; your configured
 model remains in effect.
@@ -118,12 +118,26 @@ an explicit title or numbered branch. No PBI is invented when none is resolved.
 The primary PBI and other commit work items are linked to the Azure PR.
 
 Templates are read from the **committed source branch**, not the current worktree.
-Discovery checks `pull_request_template.md` and `.txt` in `.azuredevops/`, `.vsts/`,
-`docs/`, and the repository root, followed by `.github/PULL_REQUEST_TEMPLATE.md`
-and `.github/pull_request_template.md`. The first match wins. Use `--template`
-for an explicit local file. Azure's web UI independently discovers its default
-template from the repository's default branch, so merge the template there to
-enable automatic selection in the UI.
+Discovery first checks target-branch-specific `.md` and `.txt` files under
+`pull_request_template/branches/` in `.azuredevops/`, `.vsts/`, `docs/`, and the
+repository root, in that order. The most specific matching branch prefix wins
+within each location, up to ten branch levels; matching is case-insensitive.
+For example, `.azuredevops/pull_request_template/branches/develop.md` applies
+to PRs targeting `develop` or `develop/*`, not to PRs targeting `feat/*`.
+
+If no branch template matches, discovery checks the global
+`pull_request_template.md` and `.txt` in the same locations, followed by
+`.github/PULL_REQUEST_TEMPLATE.md` and `.github/pull_request_template.md`.
+Use `--template` for an explicit local file. With no applicable template,
+Copilot still generates a commit-style title and a concise description without
+imposing template sections; this is reported on stderr.
+
+To scope a template to `develop`, keep only the branch-specific `develop.md`,
+not a global default. Azure's web UI independently reads templates from the
+repository's **default branch**, so merge the scoped template there to enable
+automatic selection in the UI. It copies the template verbatim into the raw
+description, including HTML guidance comments; authors must replace guidance
+with real content. The Copilot flow is instructed to remove guidance comments.
 
 The generated description must fill the template's `##` sections; sections whose
 guidance says "Remove this section" are optional. Generation is instructed to
@@ -152,7 +166,7 @@ checked against a discovered or explicitly selected template, if present.
 Non-interactive creation requires `--yes`; use `--preview` to review first.
 Declining confirmation leaves the remote branch and PR untouched.
 
-Missing templates, invalid JSON, invalid titles, unfilled sections, Copilot
+Unreadable explicit templates, invalid JSON, invalid titles, unfilled sections, Copilot
 authentication/process failures, and generation timeouts fail **before any push
 or PR creation**. Generation has a 120-second timeout, a 96 KiB prompt limit, and
 a 256 KiB limit per output stream; oversized diffs are never silently truncated.
