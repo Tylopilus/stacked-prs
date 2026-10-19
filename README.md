@@ -34,7 +34,8 @@ stacked-prs reparent --continue
 stacked-prs reparent --abort
 stacked-prs sync --all [--from <branch>] [--dry-run] [--push] [--no-pr]
 stacked-prs mark-merged [branch]
-stacked-prs pr create [branch] [--title <title>] [--draft]
+stacked-prs pr create [branch] [--title <title>] [--description-file <path>]
+                      [--template <path>] [--no-ai] [--preview] [--yes] [--draft]
 stacked-prs pr sync
 stacked-prs land [branch]
 stacked-prs cleanup [--dry-run]
@@ -81,14 +82,15 @@ If the branch has a tracked Azure DevOps PR, `stacked-prs pr sync` or `stacked-p
 Azure DevOps integration shells out to `az repos pr ...` from the repository root, so the Azure CLI must be installed, logged in, and able to infer the organization, project, and repository from the git remote.
 
 ```bash
-stacked-prs pr create feature/a --title "Feature A"
+stacked-prs pr create feature/a --preview
+stacked-prs pr create feature/a --title "feat: add feature A"
 stacked-prs pr create feature/b --draft
 stacked-prs pr sync
 stacked-prs land feature/a
 stacked-prs sync --all --push
 ```
 
-- `pr create` pushes the tracked branch, opens a PR targeting its effective parent, records the PR in local stack state, and refreshes the generated stack block in open PR descriptions
+- `pr create` generates and validates PR metadata, asks for confirmation, then pushes the tracked branch, opens a PR targeting its effective parent, records the PR in local stack state, and refreshes the generated stack block in open PR descriptions
 - `pr sync` reconciles tracked PRs with Azure DevOps, marks completed PRs as merged, drops abandoned PR references, retargets active PRs when their expected parent changes, and refreshes stack descriptions
 - `land` sets Azure DevOps auto-complete on the bottom PR of the stack with squash merge and source-branch deletion enabled
 - `sync --all` reconciles tracked PRs before planning rebases; use `--no-pr` to skip Azure DevOps calls
@@ -98,6 +100,65 @@ stacked-prs sync --all --push
 Rebases onto trunk use its fetched remote-tracking tip from the configured remote,
 even when the local trunk branch has not been pulled. Active stacked parents use
 their local tips so children follow parents rebased earlier in the same sync.
+
+### AI-generated titles and descriptions
+
+PR creation uses an installed, authenticated GitHub Copilot CLI (`copilot`) by
+default. It sends the committed diff and commit subjects between the requested
+branch and its effective PR target, plus a description template. Uncommitted
+worktree changes and lower stack changes are not included. Copilot runs with
+tools, custom instructions, and built-in MCP servers disabled; your configured
+model remains in effect.
+
+Titles follow conventional commit syntax because they become squash commit
+messages: `feat: #1470 generate PR metadata`. The primary work item comes from a
+numeric branch prefix such as `feat/1470-description`, an explicit title, or a
+single referenced commit work item, in that order. Ambiguous work items require
+an explicit title or numbered branch. No PBI is invented when none is resolved.
+The primary PBI and other commit work items are linked to the Azure PR.
+
+Templates are read from the **committed source branch**, not the current worktree.
+Discovery checks `pull_request_template.md` and `.txt` in `.azuredevops/`, `.vsts/`,
+`docs/`, and the repository root, followed by `.github/PULL_REQUEST_TEMPLATE.md`
+and `.github/pull_request_template.md`. The first match wins. Use `--template`
+for an explicit local file. Azure's web UI independently discovers its default
+template from the repository's default branch, so merge the template there to
+enable automatic selection in the UI.
+
+The generated description must fill the template's `##` sections; sections whose
+guidance says "Remove this section" are optional. Generation is instructed to
+explain the problem, high-level solution, and rationale, without inventing test
+results or visual evidence. Review the preview for accuracy. The stack overview
+is appended separately and preserved by subsequent stack updates.
+
+```bash
+# Generate JSON without pushing, opening a PR, or changing stack state.
+stacked-prs pr create feat/1470-metadata --preview
+
+# Review the metadata interactively, then confirm creation.
+stacked-prs pr create feat/1470-metadata --draft
+
+# Use a specific template and skip the confirmation prompt.
+stacked-prs pr create --template ./review-template.md --yes
+
+# Supply reviewed metadata without calling Copilot.
+stacked-prs pr create --no-ai --title "docs: #1470 document PR creation" \
+  --description-file ./description.md --yes
+```
+
+`--title` and `--description-file` override their respective generated fields;
+supplying both bypasses AI even without `--no-ai`. Manual descriptions are still
+checked against a discovered or explicitly selected template, if present.
+Non-interactive creation requires `--yes`; use `--preview` to review first.
+Declining confirmation leaves the remote branch and PR untouched.
+
+Missing templates, invalid JSON, invalid titles, unfilled sections, Copilot
+authentication/process failures, and generation timeouts fail **before any push
+or PR creation**. Generation has a 120-second timeout, a 96 KiB prompt limit, and
+a 256 KiB limit per output stream; oversized diffs are never silently truncated.
+Changed `.env`, `.env.*`, `.pem`, and `.key` files are conservatively refused,
+including example files; use manual metadata instead. This filename guard is
+not a secret scanner: inspect committed changes before sending them to Copilot.
 
 ## Safety rules
 

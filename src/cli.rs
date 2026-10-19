@@ -1,5 +1,6 @@
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
+use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(name = "stack")]
@@ -164,8 +165,27 @@ pub struct PrShowArgs {
 pub struct PrCreateArgs {
     #[arg(help = "Tracked branch; defaults to the current branch")]
     pub branch: Option<String>,
-    #[arg(long, help = "PR title; defaults to the branch name")]
+    #[arg(long, help = "Override the Copilot-generated commit-style PR title")]
     pub title: Option<String>,
+    #[arg(long, help = "Read the PR description from a Markdown file")]
+    pub description_file: Option<PathBuf>,
+    #[arg(
+        long,
+        help = "Use this description template instead of discovering one"
+    )]
+    pub template: Option<PathBuf>,
+    #[arg(
+        long,
+        help = "Require explicit title and description; do not invoke Copilot"
+    )]
+    pub no_ai: bool,
+    #[arg(
+        long,
+        help = "Generate and print metadata as JSON without pushing or creating a PR"
+    )]
+    pub preview: bool,
+    #[arg(long, help = "Create the PR without an interactive confirmation")]
+    pub yes: bool,
     #[arg(long, help = "Create the PR as a draft")]
     pub draft: bool,
 }

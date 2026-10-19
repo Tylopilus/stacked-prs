@@ -221,7 +221,7 @@ impl GitRepo {
         ])?))
     }
 
-    fn git(&self, args: &[&str]) -> Result<String> {
+    pub(crate) fn git(&self, args: &[&str]) -> Result<String> {
         let output = Command::new("git")
             .args(args)
             .current_dir(&self.root)

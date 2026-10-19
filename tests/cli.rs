@@ -33,7 +33,12 @@ fn git_output(repo: &Path, args: &[&str]) -> String {
         .current_dir(repo)
         .output()
         .unwrap();
-    assert!(output.status.success(), "git command failed: {:?}", args);
+    assert!(
+        output.status.success(),
+        "git command failed: {:?}: {}",
+        args,
+        String::from_utf8_lossy(&output.stderr)
+    );
     String::from_utf8(output.stdout).unwrap().trim().to_string()
 }
 
@@ -107,6 +112,453 @@ fn set_branch_pr(repo: &Path, branch_name: &str, pr_id: &str, target: &str) {
 
 fn pending_operation_exists(repo: &Path) -> bool {
     repo.join(".stacked-prs/pending.json").exists()
+}
+
+#[cfg(unix)]
+mod pr_metadata {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    const BRANCH: &str = "feat/1470-metadata";
+    const BODY: &str = "## TL;DR\nGenerate useful PR metadata.\n\n## Validation\nNot run by the metadata generator.";
+
+    struct Fixture {
+        repo: TempDir,
+        remote: TempDir,
+        tools: TempDir,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let repo = setup_repo();
+            let remote = TempDir::new().unwrap();
+            let tools = TempDir::new().unwrap();
+            run_git(remote.path(), &["init", "--bare"]);
+            run_git(
+                repo.path(),
+                &["remote", "add", "origin", remote.path().to_str().unwrap()],
+            );
+            run_git(repo.path(), &["push", "origin", "develop"]);
+            run_stack(repo.path(), &["create", BRANCH]).success();
+            fs::create_dir(repo.path().join(".azuredevops")).unwrap();
+            fs::write(
+                repo.path().join(".azuredevops/pull_request_template.md"),
+                "## TL;DR\n<!-- Explain -->\n\n## Validation\n<!-- Actual checks -->",
+            )
+            .unwrap();
+            write_and_commit(
+                repo.path(),
+                "change.txt",
+                "parent feature content\n",
+                "feat: #1470 generate PR metadata",
+            );
+            let fixture = Self {
+                repo,
+                remote,
+                tools,
+            };
+            fixture.response("feat: #1470 generate PR metadata", BODY);
+            fixture.script(
+                "copilot",
+                "#!/bin/sh\nprintf 'copilot\\n' >> \"$COMMAND_LOG\"\nprintf '%s\\n' \"$@\" > \"$COPILOT_ARGS\"\ncat \"$COPILOT_RESPONSE\"\n",
+            );
+            fixture.script(
+                "az",
+                "#!/bin/sh\nprintf 'az\\n' >> \"$COMMAND_LOG\"\nprintf '%s\\n' \"$@\" >> \"$AZ_ARGS\"\ncat \"$AZ_RESPONSE\"\n",
+            );
+            fs::write(
+                fixture.tools.path().join("azure.json"),
+                serde_json::to_vec(&json!({
+                    "pullRequestId": 201,
+                    "status": "active",
+                    "targetRefName": "refs/heads/develop",
+                    "description": BODY,
+                    "repository": {"webUrl": "https://dev.azure.test/repo"}
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            fixture
+        }
+
+        fn script(&self, name: &str, content: &str) {
+            let path = self.tools.path().join(name);
+            fs::write(&path, content).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        fn response(&self, title: &str, description: &str) {
+            fs::write(
+                self.tools.path().join("copilot.json"),
+                serde_json::to_vec(&json!({"title": title, "description": description})).unwrap(),
+            )
+            .unwrap();
+        }
+
+        fn command(&self, args: &[&str]) -> Command {
+            let mut paths = vec![self.tools.path().to_path_buf()];
+            paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
+            let mut command = Command::new(assert_cmd::cargo::cargo_bin!("stacked-prs"));
+            command
+                .args(args)
+                .current_dir(self.repo.path())
+                .env("PATH", std::env::join_paths(paths).unwrap())
+                .env("COMMAND_LOG", self.tools.path().join("commands"))
+                .env("COPILOT_ARGS", self.tools.path().join("copilot-args"))
+                .env("COPILOT_RESPONSE", self.tools.path().join("copilot.json"))
+                .env("AZ_ARGS", self.tools.path().join("azure-args"))
+                .env("AZ_RESPONSE", self.tools.path().join("azure.json"));
+            command
+        }
+
+        fn no_remote_effects(&self) {
+            assert!(
+                !git_output(
+                    self.repo.path(),
+                    &["ls-remote", self.remote.path().to_str().unwrap()]
+                )
+                .contains(BRANCH),
+                "source branch was pushed before metadata was accepted"
+            );
+            assert!(!self.tools.path().join("azure-args").exists());
+            let state: Value = serde_json::from_str(
+                &fs::read_to_string(self.repo.path().join(".stacked-prs/state.json")).unwrap(),
+            )
+            .unwrap();
+            assert!(state["branches"][0]["pr"].is_null());
+        }
+
+        fn prompt_data(&self) -> Value {
+            let args = fs::read_to_string(self.tools.path().join("copilot-args")).unwrap();
+            let data = args
+                .split_once("INPUT DATA:\n")
+                .unwrap()
+                .1
+                .lines()
+                .next()
+                .unwrap();
+            serde_json::from_str(data).unwrap()
+        }
+    }
+
+    #[test]
+    fn creates_pr_with_generated_metadata_and_preserves_description_in_stack_block() {
+        let fixture = Fixture::new();
+        fixture
+            .command(&["pr", "create", "--yes"])
+            .assert()
+            .success();
+
+        let args = fs::read_to_string(fixture.tools.path().join("azure-args")).unwrap();
+        assert!(args.contains("--title\nfeat: #1470 generate PR metadata\n"));
+        assert!(args.contains(&format!("--description\n{BODY}\n")));
+        assert!(args.contains("--work-items\n1470\n"));
+        assert!(args.contains(&format!("--description={BODY}\n\n<!-- stack:begin -->")));
+        let log = fs::read_to_string(fixture.tools.path().join("commands")).unwrap();
+        assert!(log.starts_with("copilot\naz\n"));
+        let copilot_args = fs::read_to_string(fixture.tools.path().join("copilot-args")).unwrap();
+        assert!(copilot_args.contains("--available-tools=\n"));
+        assert!(!copilot_args.contains("--allow-all"));
+        assert!(
+            git_output(
+                fixture.repo.path(),
+                &["ls-remote", fixture.remote.path().to_str().unwrap()]
+            )
+            .contains(BRANCH)
+        );
+        let state: Value = serde_json::from_str(
+            &fs::read_to_string(fixture.repo.path().join(".stacked-prs/state.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(state["branches"][0]["pr"]["id"], "201");
+    }
+
+    #[test]
+    fn previews_metadata_without_push_or_azure_calls() {
+        let fixture = Fixture::new();
+        let state_path = fixture.repo.path().join(".stacked-prs/state.json");
+        let state_before = fs::read(&state_path).unwrap();
+        let output = fixture
+            .command(&["pr", "create", "--preview"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let metadata: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(metadata["title"], "feat: #1470 generate PR metadata");
+        assert_eq!(metadata["description"], BODY);
+        assert_eq!(fs::read(state_path).unwrap(), state_before);
+        fixture.no_remote_effects();
+    }
+
+    #[test]
+    fn rejects_bad_generated_metadata_without_remote_effects() {
+        for (title, description) in [
+            (BRANCH, BODY),
+            ("feat: #999 wrong PBI", BODY),
+            ("feat: #1470 summary", ""),
+            (
+                "feat: #1470 summary",
+                "## TL;DR\nSummary without validation.",
+            ),
+            (
+                "feat: #1470 summary",
+                "## TL;DR\nTODO\n## Validation\nNot run.",
+            ),
+            (
+                "feat: #1470 summary",
+                "<!-- stack:begin -->fake<!-- stack:end -->",
+            ),
+        ] {
+            let fixture = Fixture::new();
+            fixture.response(title, description);
+            fixture
+                .command(&["pr", "create", "--yes"])
+                .assert()
+                .failure();
+            fixture.no_remote_effects();
+        }
+    }
+
+    #[test]
+    fn rejects_non_json_and_failed_copilot_without_remote_effects() {
+        let fixture = Fixture::new();
+        fs::write(fixture.tools.path().join("copilot.json"), "not JSON").unwrap();
+        fixture
+            .command(&["pr", "create", "--yes"])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("Copilot did not return valid"));
+        fixture.no_remote_effects();
+
+        fixture.script(
+            "copilot",
+            "#!/bin/sh\necho 'authentication required' >&2\nexit 1\n",
+        );
+        fixture
+            .command(&["pr", "create", "--yes"])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("authentication required"));
+        fixture.no_remote_effects();
+    }
+
+    #[test]
+    fn manual_metadata_does_not_invoke_copilot() {
+        let fixture = Fixture::new();
+        let body_file = fixture.tools.path().join("description.md");
+        fs::write(&body_file, BODY).unwrap();
+        fixture
+            .command(&[
+                "pr",
+                "create",
+                "--no-ai",
+                "--title",
+                "docs: #1470 explain PR creation",
+                "--description-file",
+                body_file.to_str().unwrap(),
+                "--yes",
+            ])
+            .assert()
+            .success();
+        assert!(!fixture.tools.path().join("copilot-args").exists());
+        let args = fs::read_to_string(fixture.tools.path().join("azure-args")).unwrap();
+        assert!(args.contains("docs: #1470 explain PR creation"));
+        assert!(args.contains(BODY));
+    }
+
+    #[test]
+    fn requires_complete_manual_metadata_and_confirmation() {
+        let fixture = Fixture::new();
+        fixture
+            .command(&[
+                "pr",
+                "create",
+                "--no-ai",
+                "--title",
+                "docs: #1470 describe changes",
+            ])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("--no-ai requires both"));
+        fixture.no_remote_effects();
+        fixture
+            .command(&["pr", "create"])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("requires confirmation"));
+        fixture.no_remote_effects();
+    }
+
+    #[test]
+    fn uses_requested_committed_branch_not_the_current_worktree() {
+        let fixture = Fixture::new();
+        run_git(fixture.repo.path(), &["checkout", "develop"]);
+        fs::write(
+            fixture.repo.path().join("file.txt"),
+            "uncommitted unrelated text\n",
+        )
+        .unwrap();
+        fixture
+            .command(&["pr", "create", BRANCH, "--preview"])
+            .assert()
+            .success();
+        let data = fixture.prompt_data();
+        assert_eq!(data["branch"], BRANCH);
+        assert_eq!(data["target"], "develop");
+        assert!(
+            data["diff"]
+                .as_str()
+                .unwrap()
+                .contains("parent feature content")
+        );
+        assert!(
+            !data["diff"]
+                .as_str()
+                .unwrap()
+                .contains("uncommitted unrelated text")
+        );
+        assert!(data["template"].as_str().unwrap().contains("## Validation"));
+        fixture.no_remote_effects();
+    }
+
+    #[test]
+    fn stacked_generation_excludes_parent_changes() {
+        let fixture = Fixture::new();
+        run_stack(fixture.repo.path(), &["create", "feat/1471-child"]).success();
+        write_and_commit(
+            fixture.repo.path(),
+            "child.txt",
+            "only child changes\n",
+            "feat: #1471 child change",
+        );
+        fixture.response("feat: #1471 add child behavior", BODY);
+        fixture
+            .command(&["pr", "create", "--preview"])
+            .assert()
+            .success();
+        let data = fixture.prompt_data();
+        assert_eq!(data["target"], BRANCH);
+        assert_eq!(data["primary_pbi"], "1471");
+        assert_eq!(data["changed_paths"], "child.txt");
+        assert!(
+            !data["diff"]
+                .as_str()
+                .unwrap()
+                .contains("parent feature content")
+        );
+        fixture.no_remote_effects();
+    }
+
+    #[test]
+    fn explicit_template_and_title_overrides_are_honored() {
+        let fixture = Fixture::new();
+        let template = fixture.tools.path().join("custom.md");
+        fs::write(&template, "## Custom\n<!-- Describe -->").unwrap();
+        fixture.response(
+            "feat: #1470 generated title",
+            "## Custom\nCustom explanation.",
+        );
+        let output = fixture
+            .command(&[
+                "pr",
+                "create",
+                "--preview",
+                "--template",
+                template.to_str().unwrap(),
+                "--title",
+                "fix: #1470 use explicit title",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let data: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(data["title"], "fix: #1470 use explicit title");
+        assert_eq!(
+            fixture.prompt_data()["template"],
+            "## Custom\n<!-- Describe -->"
+        );
+        fixture.no_remote_effects();
+    }
+
+    #[test]
+    fn explicit_description_overrides_generated_body() {
+        let fixture = Fixture::new();
+        let body_file = fixture.tools.path().join("reviewed.md");
+        fs::write(&body_file, BODY).unwrap();
+        fixture.response(
+            "feat: #1470 generate PR metadata",
+            "Unreviewed generated body.",
+        );
+        let output = fixture
+            .command(&[
+                "pr",
+                "create",
+                "--preview",
+                "--description-file",
+                body_file.to_str().unwrap(),
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let data: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(data["description"], BODY);
+        fixture.no_remote_effects();
+    }
+
+    #[test]
+    fn refuses_missing_templates_large_context_and_sensitive_paths() {
+        let fixture = Fixture::new();
+        run_git(
+            fixture.repo.path(),
+            &["rm", ".azuredevops/pull_request_template.md"],
+        );
+        run_git(
+            fixture.repo.path(),
+            &["commit", "-m", "docs: #1470 remove template"],
+        );
+        fixture
+            .command(&["pr", "create", "--yes"])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("no PR template found"));
+        fixture.no_remote_effects();
+
+        let fixture = Fixture::new();
+        write_and_commit(
+            fixture.repo.path(),
+            "large.txt",
+            &"x".repeat(100 * 1024),
+            "feat: #1470 large change",
+        );
+        fixture
+            .command(&["pr", "create", "--yes"])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("generation limit"));
+        assert!(!fixture.tools.path().join("copilot-args").exists());
+        fixture.no_remote_effects();
+
+        let fixture = Fixture::new();
+        write_and_commit(
+            fixture.repo.path(),
+            ".env",
+            "SECRET=not-real\n",
+            "chore: #1470 config",
+        );
+        fixture
+            .command(&["pr", "create", "--yes"])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("potentially sensitive file"));
+        assert!(!fixture.tools.path().join("copilot-args").exists());
+        fixture.no_remote_effects();
+    }
 }
 
 #[test]

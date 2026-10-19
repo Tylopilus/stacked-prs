@@ -5,6 +5,7 @@ mod error;
 mod git;
 mod graph;
 mod output;
+mod pr_metadata;
 mod rebase;
 mod state;
 mod sync;
@@ -67,9 +68,7 @@ fn run() -> Result<()> {
         Command::Pr(args) => match args.command {
             cli::PrCommand::List(args) => azure::pr_list(&repo, args.json),
             cli::PrCommand::Show(args) => azure::pr_show(&repo, args.branch_or_pr, args.json),
-            cli::PrCommand::Create(args) => {
-                azure::pr_create(&repo, args.branch, args.title, args.draft)
-            }
+            cli::PrCommand::Create(args) => azure::pr_create(&repo, args),
             cli::PrCommand::Sync(_) => azure::pr_sync(&repo),
         },
         Command::Land(args) => azure::land(&repo, args.branch),

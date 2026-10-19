@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::git::GitRepo;
 use crate::graph;
+use crate::pr_metadata;
 use crate::rebase::effective_parent;
 use crate::state::{BranchStatus, PullRequestRef, RepoState};
 
@@ -143,6 +144,7 @@ impl<'a> AzCli<'a> {
         source: &str,
         target: &str,
         title: &str,
+        description: &str,
         draft: bool,
         work_items: &[String],
     ) -> Result<PrInfo> {
@@ -156,6 +158,8 @@ impl<'a> AzCli<'a> {
             target,
             "--title",
             title,
+            "--description",
+            description,
         ];
         if draft {
             args.extend(["--draft", "true"]);
@@ -298,17 +302,12 @@ pub fn pr_show(repo: &GitRepo, branch_or_pr: Option<String>, json: bool) -> Resu
 
 /// `stack pr create [branch]`: push the branch and open a PR against its
 /// effective parent, recording the PR in stack state.
-pub fn pr_create(
-    repo: &GitRepo,
-    branch: Option<String>,
-    title: Option<String>,
-    draft: bool,
-) -> Result<()> {
+pub fn pr_create(repo: &GitRepo, args: crate::cli::PrCreateArgs) -> Result<()> {
     let mut state = RepoState::load(&repo.root)?;
     state.validate(repo)?;
 
-    let branch = match branch {
-        Some(branch) => branch,
+    let branch = match args.branch.as_ref() {
+        Some(branch) => branch.clone(),
         None => repo.current_branch()?,
     };
     let managed = state
@@ -322,12 +321,32 @@ pub fn pr_create(
     }
 
     let target = effective_parent(&state, managed);
-    let work_items = work_items_from_commits(repo, &target, &branch)?;
-    repo.push(&state.repo.remote, &branch, false)?;
+    let mut work_items = work_items_from_commits(repo, &target, &branch)?;
+    let metadata = pr_metadata::prepare(repo, &args, &branch, &target, &work_items)?;
+    if args.preview {
+        println!("{}", serde_json::to_string_pretty(&metadata)?);
+        return Ok(());
+    }
+    if !pr_metadata::confirm(&metadata, args.yes)? {
+        println!("PR creation cancelled; no branch pushed or PR created");
+        return Ok(());
+    }
+    if let Some(id) = metadata.work_item()
+        && !work_items.contains(&id)
+    {
+        work_items.push(id);
+    }
 
-    let title = title.unwrap_or_else(|| branch.clone());
+    repo.push(&state.repo.remote, &branch, false)?;
     let az = AzCli::new(repo);
-    let info = az.pr_create(&branch, &target, &title, draft, &work_items)?;
+    let info = az.pr_create(
+        &branch,
+        &target,
+        &metadata.title,
+        &metadata.description,
+        args.draft,
+        &work_items,
+    )?;
     let url = info.web_url();
 
     let managed = state
