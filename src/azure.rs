@@ -1,8 +1,8 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::process::Command;
 
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::git::GitRepo;
 use crate::graph;
@@ -40,6 +40,42 @@ pub struct Reviewer {
 pub struct RepoInfo {
     pub url: Option<String>,
     pub web_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TrackedPrSummary {
+    pub repo_root: String,
+    pub trunk: String,
+    pub branch: String,
+    pub parent: String,
+    pub effective_parent: String,
+    pub status: String,
+    pub stack_root: String,
+    pub pr: TrackedPrRef,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TrackedPrRef {
+    pub provider: String,
+    pub id: String,
+    pub url: Option<String>,
+    pub target_branch: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TrackedPrDetail {
+    pub pr: TrackedPrSummary,
+    pub stack: Vec<TrackedPrStackEntry>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TrackedPrStackEntry {
+    pub branch: String,
+    pub parent: String,
+    pub effective_parent: String,
+    pub status: String,
+    pub pr_id: Option<String>,
+    pub current: bool,
 }
 
 impl PrInfo {
@@ -108,6 +144,7 @@ impl<'a> AzCli<'a> {
         target: &str,
         title: &str,
         draft: bool,
+        work_items: &[String],
     ) -> Result<PrInfo> {
         let mut args = vec![
             "repos",
@@ -122,6 +159,10 @@ impl<'a> AzCli<'a> {
         ];
         if draft {
             args.extend(["--draft", "true"]);
+        }
+        if !work_items.is_empty() {
+            args.push("--work-items");
+            args.extend(work_items.iter().map(String::as_str));
         }
         args.extend(["-o", "json"]);
         let raw = self.az(&args)?;
@@ -205,6 +246,56 @@ impl<'a> AzCli<'a> {
     }
 }
 
+/// `stack pr list`: print active PRs tracked in local stack metadata. This is
+/// intentionally local-only; callers can use the ids with `az repos pr show`.
+pub fn pr_list(repo: &GitRepo, json: bool) -> Result<()> {
+    let state = RepoState::load(&repo.root)?;
+    state.validate_metadata(repo)?;
+    let summaries = tracked_pr_summaries(repo, &state, true)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&summaries)?);
+    } else if summaries.is_empty() {
+        println!("No active tracked PRs");
+    } else {
+        for summary in &summaries {
+            print_pr_summary(summary);
+        }
+    }
+    Ok(())
+}
+
+/// `stack pr show [branch|pr-id]`: print one tracked PR and the local stack it
+/// belongs to. Defaults to the current branch.
+pub fn pr_show(repo: &GitRepo, branch_or_pr: Option<String>, json: bool) -> Result<()> {
+    let state = RepoState::load(&repo.root)?;
+    state.validate_metadata(repo)?;
+    let identifier = match branch_or_pr {
+        Some(identifier) => identifier,
+        None => repo.current_branch()?,
+    };
+    let branch_name = find_branch_by_name_or_pr_id(&state, &identifier)?;
+    let detail = tracked_pr_detail(repo, &state, &branch_name)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&detail)?);
+    } else {
+        print_pr_summary(&detail.pr);
+        println!("  stack:");
+        for entry in &detail.stack {
+            let pr = entry
+                .pr_id
+                .as_ref()
+                .map(|id| format!("!{id}"))
+                .unwrap_or_else(|| "(no PR)".to_string());
+            let current = if entry.current { "  <- current" } else { "" };
+            println!(
+                "    - {pr} {} -> {} [{}]{current}",
+                entry.branch, entry.effective_parent, entry.status
+            );
+        }
+    }
+    Ok(())
+}
+
 /// `stack pr create [branch]`: push the branch and open a PR against its
 /// effective parent, recording the PR in stack state.
 pub fn pr_create(
@@ -231,11 +322,12 @@ pub fn pr_create(
     }
 
     let target = effective_parent(&state, managed);
+    let work_items = work_items_from_commits(repo, &target, &branch)?;
     repo.push(&state.repo.remote, &branch, false)?;
 
     let title = title.unwrap_or_else(|| branch.clone());
     let az = AzCli::new(repo);
-    let info = az.pr_create(&branch, &target, &title, draft)?;
+    let info = az.pr_create(&branch, &target, &title, draft, &work_items)?;
     let url = info.web_url();
 
     let managed = state
@@ -257,8 +349,161 @@ pub fn pr_create(
         println!("  {url}");
     }
 
+    if !work_items.is_empty() {
+        println!("Linked work item(s): #{}", work_items.join(", #"));
+    }
+
     update_stack_descriptions(&az, &state)?;
     Ok(())
+}
+
+fn tracked_pr_summaries(
+    repo: &GitRepo,
+    state: &RepoState,
+    active_only: bool,
+) -> Result<Vec<TrackedPrSummary>> {
+    let mut summaries = Vec::new();
+    for name in graph::descendants_topo(state)? {
+        let branch = state
+            .branch(name)
+            .expect("branch should exist in topological order");
+        if active_only && branch.status != BranchStatus::Active {
+            continue;
+        }
+        if branch.pr.is_none() {
+            continue;
+        }
+        summaries.push(tracked_pr_summary(repo, state, name)?);
+    }
+    Ok(summaries)
+}
+
+fn tracked_pr_detail(repo: &GitRepo, state: &RepoState, branch: &str) -> Result<TrackedPrDetail> {
+    let pr = tracked_pr_summary(repo, state, branch)?;
+    let order: Vec<String> = graph::descendants_topo(state)?
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect();
+    let stack = stack_order_for_branch(state, &order, branch)
+        .into_iter()
+        .map(|name| {
+            let branch_state = state
+                .branch(&name)
+                .expect("branch should exist in stack order");
+            TrackedPrStackEntry {
+                branch: branch_state.name.clone(),
+                parent: branch_state.parent.clone(),
+                effective_parent: effective_parent(state, branch_state),
+                status: branch_status_label(&branch_state.status).to_string(),
+                pr_id: branch_state.pr.as_ref().map(|pr| pr.id.clone()),
+                current: branch_state.name == branch,
+            }
+        })
+        .collect();
+    Ok(TrackedPrDetail { pr, stack })
+}
+
+fn tracked_pr_summary(
+    repo: &GitRepo,
+    state: &RepoState,
+    branch_name: &str,
+) -> Result<TrackedPrSummary> {
+    let branch = state
+        .branch(branch_name)
+        .ok_or_else(|| anyhow::anyhow!("branch not tracked: {branch_name}"))?;
+    let pr = branch
+        .pr
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("branch has no tracked PR: {branch_name}"))?;
+    Ok(TrackedPrSummary {
+        repo_root: repo.root.display().to_string(),
+        trunk: state.repo.trunk.clone(),
+        branch: branch.name.clone(),
+        parent: branch.parent.clone(),
+        effective_parent: effective_parent(state, branch),
+        status: branch_status_label(&branch.status).to_string(),
+        stack_root: stack_root(state, branch_name),
+        pr: TrackedPrRef {
+            provider: pr.provider.clone(),
+            id: pr.id.clone(),
+            url: pr.url.clone(),
+            target_branch: pr.target_branch.clone(),
+        },
+    })
+}
+
+fn find_branch_by_name_or_pr_id(state: &RepoState, identifier: &str) -> Result<String> {
+    let normalized = identifier.strip_prefix('!').unwrap_or(identifier);
+    if state.branch(identifier).is_some() {
+        return Ok(identifier.to_string());
+    }
+    let matches: Vec<&str> = state
+        .branches
+        .iter()
+        .filter(|branch| branch.pr.as_ref().is_some_and(|pr| pr.id == normalized))
+        .map(|branch| branch.name.as_str())
+        .collect();
+    match matches.as_slice() {
+        [branch] => Ok((*branch).to_string()),
+        [] => anyhow::bail!("no tracked branch or PR id matches: {identifier}"),
+        _ => anyhow::bail!("multiple tracked branches match PR id: {identifier}"),
+    }
+}
+
+fn print_pr_summary(summary: &TrackedPrSummary) {
+    println!(
+        "!{} {} -> {} [{}]",
+        summary.pr.id, summary.branch, summary.effective_parent, summary.status
+    );
+    println!("  parent: {}", summary.parent);
+    println!("  stack root: {}", summary.stack_root);
+    println!("  provider: {}", summary.pr.provider);
+    if let Some(target) = &summary.pr.target_branch {
+        println!("  tracked target: {target}");
+    }
+    if let Some(url) = &summary.pr.url {
+        println!("  url: {url}");
+    }
+}
+
+fn branch_status_label(status: &BranchStatus) -> &'static str {
+    match status {
+        BranchStatus::Active => "active",
+        BranchStatus::Merged => "merged",
+        BranchStatus::Archived => "archived",
+    }
+}
+
+fn work_items_from_commits(repo: &GitRepo, base: &str, branch: &str) -> Result<Vec<String>> {
+    let mut work_items = BTreeSet::new();
+    for subject in repo.commit_subjects(base, branch)? {
+        if let Some(work_item) = extract_work_item_reference(&subject) {
+            work_items.insert(work_item);
+        }
+    }
+    Ok(work_items.into_iter().collect())
+}
+
+fn extract_work_item_reference(subject: &str) -> Option<String> {
+    let bytes = subject.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'#' {
+            index += 1;
+            continue;
+        }
+
+        let start = index + 1;
+        let mut end = start;
+        while end < bytes.len() && bytes[end].is_ascii_digit() {
+            end += 1;
+        }
+        if end > start {
+            return Some(subject[start..end].to_string());
+        }
+        index = start;
+    }
+    None
 }
 
 /// `stack pr sync`: reconcile PR completion/abandonment with local state and
@@ -693,6 +938,23 @@ mod tests {
             stack_order_for_branch(&state, &order, "other/a"),
             vec!["other/a".to_string(), "other/b".to_string()]
         );
+    }
+
+    #[test]
+    fn extracts_work_item_reference_from_commit_subject() {
+        assert_eq!(
+            extract_work_item_reference("#607 feat: some feat"),
+            Some("607".to_string())
+        );
+        assert_eq!(
+            extract_work_item_reference("feat: some feat #607"),
+            Some("607".to_string())
+        );
+        assert_eq!(
+            extract_work_item_reference("feat #607: some feat"),
+            Some("607".to_string())
+        );
+        assert_eq!(extract_work_item_reference("feat: no pbi"), None);
     }
 
     #[test]

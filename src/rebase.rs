@@ -22,15 +22,14 @@ pub fn effective_parent(state: &RepoState, branch: &crate::state::ManagedBranch)
     }
 }
 
-pub fn rebase_target(repo: &GitRepo, effective_parent: &str, trunk: &str) -> Result<String> {
-    let remote_tracking = format!("origin/{}", effective_parent);
-    if repo.branch_exists(&remote_tracking)? {
-        return Ok(remote_tracking);
-    }
-    if effective_parent == trunk {
-        if let Ok(local_tip) = repo.branch_tip(effective_parent) {
-            return Ok(local_tip);
-        }
+pub fn rebase_target(
+    repo: &GitRepo,
+    effective_parent: &str,
+    trunk: &str,
+    remote: &str,
+) -> Result<String> {
+    if effective_parent == trunk && repo.remote_branch_exists(remote, effective_parent)? {
+        return repo.branch_tip(&format!("refs/remotes/{remote}/{effective_parent}"));
     }
     repo.branch_tip(effective_parent)
 }
@@ -47,7 +46,12 @@ pub fn plan_rebase(
     let effective_parent = onto
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| effective_parent(state, branch));
-    let new_base = rebase_target(repo, &effective_parent, &state.repo.trunk)?;
+    let new_base = rebase_target(
+        repo,
+        &effective_parent,
+        &state.repo.trunk,
+        &state.repo.remote,
+    )?;
     let old_base = branch.recorded_parent_tip.clone();
     if old_base == new_base {
         return Ok(None);

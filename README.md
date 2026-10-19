@@ -95,12 +95,20 @@ stacked-prs sync --all --push
 - `sync --from <branch>` rebases only descendants of that branch and leaves the branch itself plus lower stack branches untouched
 - `sync --all --push` force-pushes active tracked branches with lease so their PRs update after restacking
 
+Rebases onto trunk use its fetched remote-tracking tip from the configured remote,
+even when the local trunk branch has not been pulled. Active stacked parents use
+their local tips so children follow parents rebased earlier in the same sync.
+
 ## Safety rules
 
 - `rebase` and `sync` fail on a dirty worktree
 - `sync --push` uses `--force-with-lease`
 - `create` checks out the new branch immediately
 - `cleanup` only deletes merged leaf branches and never deletes the current branch
+
+Merged and archived branches are historical metadata: their local refs and parent
+refs may be deleted without blocking `track`, `doctor`, or `sync`. Active branches
+and their effective parents must still exist; children of merged branches use trunk.
 
 ## Shell Completions
 

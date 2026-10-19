@@ -134,12 +134,30 @@ pub struct PrArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum PrCommand {
+    #[command(about = "List tracked pull requests from local stack metadata")]
+    List(PrListArgs),
+    #[command(about = "Show one tracked pull request and its local stack")]
+    Show(PrShowArgs),
     #[command(about = "Push a tracked branch and open a PR targeting its effective parent")]
     Create(PrCreateArgs),
     #[command(
         about = "Reconcile PRs: auto-mark merged branches, retarget drifted PRs, refresh descriptions"
     )]
     Sync(PrSyncArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct PrListArgs {
+    #[arg(long, help = "Print PR list as JSON")]
+    pub json: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct PrShowArgs {
+    #[arg(help = "Tracked branch or PR id; defaults to the current branch")]
+    pub branch_or_pr: Option<String>,
+    #[arg(long, help = "Print PR detail as JSON")]
+    pub json: bool,
 }
 
 #[derive(Args, Debug)]

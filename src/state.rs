@@ -117,11 +117,13 @@ impl RepoState {
     pub fn validate(&self, repo: &GitRepo) -> Result<()> {
         self.validate_metadata(repo)?;
         for branch in &self.branches {
-            if branch.status != BranchStatus::Archived {
-                repo.ensure_branch_exists(&branch.name)?;
+            if branch.status != BranchStatus::Active {
+                continue;
             }
-            if branch.parent != self.repo.trunk {
-                repo.ensure_branch_exists(&branch.parent)?;
+            repo.ensure_branch_exists(&branch.name)?;
+            let parent = crate::rebase::effective_parent(self, branch);
+            if parent != self.repo.trunk {
+                repo.ensure_branch_exists(&parent)?;
             }
         }
         Ok(())

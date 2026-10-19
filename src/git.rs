@@ -57,6 +57,15 @@ impl GitRepo {
         ])?)
     }
 
+    pub fn remote_branch_exists(&self, remote: &str, name: &str) -> Result<bool> {
+        self.run_status(&[
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/remotes/{remote}/{name}"),
+        ])
+    }
+
     pub fn ensure_branch_exists(&self, name: &str) -> Result<()> {
         if self.branch_exists(name)? {
             Ok(())
@@ -191,6 +200,17 @@ impl GitRepo {
         } else {
             self.run(&["push", "--set-upstream", remote, branch])
         }
+    }
+
+    pub fn commit_subjects(&self, base: &str, branch: &str) -> Result<Vec<String>> {
+        let range = format!("{base}..{branch}");
+        let output = self.git(&["log", "--format=%s", &range])?;
+        Ok(output
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(ToOwned::to_owned)
+            .collect())
     }
 
     fn git_path(&self, path: &str) -> Result<PathBuf> {

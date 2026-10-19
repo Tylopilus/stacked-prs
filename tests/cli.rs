@@ -3,7 +3,7 @@ use std::path::Path;
 use std::process::Command;
 
 use assert_cmd::prelude::*;
-use serde_json::Value;
+use serde_json::{Value, json};
 use tempfile::TempDir;
 
 fn setup_repo() -> TempDir {
@@ -87,6 +87,24 @@ fn tracked_branch_count(repo: &Path) -> usize {
     state["branches"].as_array().unwrap().len()
 }
 
+fn set_branch_pr(repo: &Path, branch_name: &str, pr_id: &str, target: &str) {
+    let path = repo.join(".stacked-prs/state.json");
+    let mut state: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    let branch = state["branches"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|branch| branch["name"] == branch_name)
+        .unwrap_or_else(|| panic!("branch not tracked: {branch_name}"));
+    branch["pr"] = json!({
+        "provider": "azure-devops",
+        "id": pr_id,
+        "url": format!("https://dev.azure.test/pr/{pr_id}"),
+        "target_branch": target,
+    });
+    fs::write(path, serde_json::to_string_pretty(&state).unwrap()).unwrap();
+}
+
 fn pending_operation_exists(repo: &Path) -> bool {
     repo.join(".stacked-prs/pending.json").exists()
 }
@@ -157,6 +175,54 @@ fn create_auto_tracks_untracked_current_branch() {
 
     assert_eq!(branch_parent(repo.path(), "feature/a"), "develop");
     assert_eq!(branch_parent(repo.path(), "feature/b"), "feature/a");
+}
+
+#[test]
+fn pr_list_outputs_tracked_prs_as_json() {
+    let repo = setup_repo();
+    run_stack(repo.path(), &["create", "feature/a"]).success();
+    run_stack(repo.path(), &["create", "feature/b"]).success();
+    set_branch_pr(repo.path(), "feature/a", "101", "develop");
+    set_branch_pr(repo.path(), "feature/b", "102", "feature/a");
+
+    let output = run_stack(repo.path(), &["pr", "list", "--json"])
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let output: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(output.as_array().unwrap().len(), 2);
+    assert_eq!(output[0]["branch"], "feature/a");
+    assert_eq!(output[0]["effective_parent"], "develop");
+    assert_eq!(output[0]["pr"]["id"], "101");
+    assert_eq!(output[1]["branch"], "feature/b");
+    assert_eq!(output[1]["effective_parent"], "feature/a");
+    assert_eq!(output[1]["pr"]["id"], "102");
+}
+
+#[test]
+fn pr_show_accepts_pr_id_and_includes_stack() {
+    let repo = setup_repo();
+    run_stack(repo.path(), &["create", "feature/a"]).success();
+    run_stack(repo.path(), &["create", "feature/b"]).success();
+    set_branch_pr(repo.path(), "feature/a", "101", "develop");
+    set_branch_pr(repo.path(), "feature/b", "102", "feature/a");
+
+    let output = run_stack(repo.path(), &["pr", "show", "!102", "--json"])
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let output: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(output["pr"]["branch"], "feature/b");
+    assert_eq!(output["pr"]["pr"]["id"], "102");
+    assert_eq!(output["stack"].as_array().unwrap().len(), 2);
+    assert_eq!(output["stack"][0]["branch"], "feature/a");
+    assert_eq!(output["stack"][0]["pr_id"], "101");
+    assert_eq!(output["stack"][1]["branch"], "feature/b");
+    assert_eq!(output["stack"][1]["current"], true);
 }
 
 #[test]
@@ -301,6 +367,109 @@ fn mark_merged_allows_missing_local_branch() {
 }
 
 #[test]
+fn validation_allows_tracking_after_merged_branch_refs_are_deleted() {
+    let repo = setup_repo();
+    run_git(repo.path(), &["branch", "feature/ancestor"]);
+    run_stack(
+        repo.path(),
+        &["create", "feature/merged", "--parent", "feature/ancestor"],
+    )
+    .success();
+    run_stack(repo.path(), &["mark-merged", "feature/merged"]).success();
+    run_git(repo.path(), &["checkout", "develop"]);
+    run_git(
+        repo.path(),
+        &["branch", "-D", "feature/merged", "feature/ancestor"],
+    );
+    run_git(repo.path(), &["branch", "feature/configs"]);
+
+    run_stack(repo.path(), &["doctor"]).success();
+    run_stack(
+        repo.path(),
+        &["track", "feature/configs", "--parent", "develop"],
+    )
+    .success();
+
+    assert_eq!(branch_parent(repo.path(), "feature/configs"), "develop");
+}
+
+#[test]
+fn validation_allows_sync_after_merged_branch_refs_are_deleted() {
+    let repo = setup_repo();
+    run_git(repo.path(), &["branch", "feature/ancestor"]);
+    run_stack(
+        repo.path(),
+        &["create", "feature/merged", "--parent", "feature/ancestor"],
+    )
+    .success();
+    write_and_commit(repo.path(), "a.txt", "from a\n", "feature a change");
+    run_stack(repo.path(), &["create", "feature/child"]).success();
+    write_and_commit(repo.path(), "b.txt", "from b\n", "feature b change");
+
+    run_git(repo.path(), &["checkout", "develop"]);
+    run_git(repo.path(), &["merge", "--squash", "feature/merged"]);
+    run_git(repo.path(), &["commit", "-m", "squash feature a"]);
+    run_stack(repo.path(), &["mark-merged", "feature/merged"]).success();
+    run_git(
+        repo.path(),
+        &["branch", "-D", "feature/merged", "feature/ancestor"],
+    );
+    run_git(repo.path(), &["checkout", "feature/child"]);
+
+    run_stack(repo.path(), &["sync", "--all", "--no-pr"]).success();
+    run_stack(repo.path(), &["doctor"]).success();
+
+    assert_eq!(
+        git_output(repo.path(), &["merge-base", "develop", "feature/child"]),
+        git_output(repo.path(), &["rev-parse", "develop"])
+    );
+    assert_eq!(
+        git_output(
+            repo.path(),
+            &["diff", "--name-only", "develop...feature/child"],
+        ),
+        "b.txt"
+    );
+    run_stack(repo.path(), &["sync", "--dry-run", "--no-pr"])
+        .success()
+        .stdout(predicates::str::contains(
+            "All tracked branches are up to date",
+        ));
+}
+
+#[test]
+fn validation_rejects_missing_active_branch() {
+    let repo = setup_repo();
+    run_stack(repo.path(), &["create", "feature/active"]).success();
+    run_git(repo.path(), &["checkout", "develop"]);
+    run_git(repo.path(), &["branch", "-D", "feature/active"]);
+
+    run_stack(repo.path(), &["doctor"])
+        .failure()
+        .stderr(predicates::str::contains(
+            "branch does not exist locally: feature/active",
+        ));
+}
+
+#[test]
+fn validation_rejects_missing_active_parent() {
+    let repo = setup_repo();
+    run_git(repo.path(), &["branch", "feature/parent"]);
+    run_stack(
+        repo.path(),
+        &["create", "feature/active", "--parent", "feature/parent"],
+    )
+    .success();
+    run_git(repo.path(), &["branch", "-D", "feature/parent"]);
+
+    run_stack(repo.path(), &["doctor"])
+        .failure()
+        .stderr(predicates::str::contains(
+            "branch does not exist locally: feature/parent",
+        ));
+}
+
+#[test]
 fn sync_rebases_child_after_parent_squash_merge() {
     let repo = setup_repo();
     run_stack(repo.path(), &["create", "feature/a"]).success();
@@ -325,6 +494,140 @@ fn sync_rebases_child_after_parent_squash_merge() {
     let diff = String::from_utf8(diff.stdout).unwrap();
     assert!(diff.contains("b.txt"));
     assert!(!diff.contains("a.txt"));
+}
+
+#[test]
+fn sync_rebases_stack_onto_fetched_trunk_after_squash_merge() {
+    for remote_name in ["origin", "upstream"] {
+        let repo = setup_repo();
+        let remote = TempDir::new().unwrap();
+        run_git(remote.path(), &["init", "--bare"]);
+        run_git(
+            repo.path(),
+            &[
+                "remote",
+                "add",
+                remote_name,
+                remote.path().to_str().unwrap(),
+            ],
+        );
+        run_git(repo.path(), &["push", "-u", remote_name, "develop"]);
+        run_stack(repo.path(), &["init", "--remote", remote_name]).success();
+        let local_trunk = git_output(repo.path(), &["rev-parse", "develop"]);
+
+        run_stack(repo.path(), &["create", "feature/a"]).success();
+        write_and_commit(repo.path(), "file.txt", "from a\n", "feature a change");
+        run_stack(repo.path(), &["create", "feature/b"]).success();
+        write_and_commit(repo.path(), "file.txt", "from b\n", "feature b change");
+        run_stack(repo.path(), &["create", "feature/c"]).success();
+        write_and_commit(repo.path(), "c.txt", "from c\n", "feature c change");
+        run_git(
+            repo.path(),
+            &["push", remote_name, "feature/a", "feature/b", "feature/c"],
+        );
+
+        let merger = setup_repo();
+        run_git(
+            merger.path(),
+            &[
+                "remote",
+                "add",
+                remote_name,
+                remote.path().to_str().unwrap(),
+            ],
+        );
+        run_git(merger.path(), &["fetch", remote_name]);
+        run_git(
+            merger.path(),
+            &[
+                "checkout",
+                "-b",
+                "landed",
+                &format!("refs/remotes/{remote_name}/develop"),
+            ],
+        );
+        run_git(
+            merger.path(),
+            &[
+                "merge",
+                "--squash",
+                &format!("refs/remotes/{remote_name}/feature/a"),
+            ],
+        );
+        run_git(merger.path(), &["commit", "-m", "squash feature a"]);
+        run_git(merger.path(), &["push", remote_name, "HEAD:develop"]);
+        run_stack(repo.path(), &["mark-merged", "feature/a"]).success();
+
+        run_stack(repo.path(), &["sync", "--all", "--push", "--no-pr"]).success();
+
+        let fetched_trunk = git_output(
+            repo.path(),
+            &["rev-parse", &format!("refs/remotes/{remote_name}/develop")],
+        );
+        let rebased_parent = git_output(repo.path(), &["rev-parse", "feature/b"]);
+        assert_eq!(
+            local_trunk,
+            git_output(repo.path(), &["rev-parse", "develop"])
+        );
+        assert_eq!(
+            fetched_trunk,
+            git_output(repo.path(), &["merge-base", &fetched_trunk, "feature/b"])
+        );
+        assert_eq!(
+            rebased_parent,
+            git_output(repo.path(), &["merge-base", "feature/b", "feature/c"])
+        );
+        assert_eq!(
+            "feature b change",
+            git_output(
+                repo.path(),
+                &["log", "--format=%s", &format!("{fetched_trunk}..feature/b")],
+            )
+        );
+        assert_eq!(
+            "feature c change",
+            git_output(repo.path(), &["log", "--format=%s", "feature/b..feature/c"])
+        );
+        for branch in ["feature/b", "feature/c"] {
+            assert_eq!(
+                git_output(repo.path(), &["rev-parse", branch]),
+                git_output(
+                    remote.path(),
+                    &[
+                        "--git-dir",
+                        remote.path().to_str().unwrap(),
+                        "rev-parse",
+                        &format!("refs/heads/{branch}"),
+                    ],
+                )
+            );
+        }
+
+        let state: Value = serde_json::from_str(
+            &fs::read_to_string(repo.path().join(".stacked-prs/state.json")).unwrap(),
+        )
+        .unwrap();
+        for (name, expected_tip) in [
+            ("feature/b", fetched_trunk.as_str()),
+            ("feature/c", rebased_parent.as_str()),
+        ] {
+            let branch = state["branches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|branch| branch["name"] == name)
+                .unwrap();
+            assert_eq!(
+                branch["recorded_parent_tip"].as_str().unwrap(),
+                expected_tip
+            );
+        }
+        run_stack(repo.path(), &["sync", "--all", "--no-pr"])
+            .success()
+            .stdout(predicates::str::contains(
+                "All tracked branches are up to date",
+            ));
+    }
 }
 
 #[test]
@@ -425,6 +728,14 @@ fn sync_push_pushes_active_branch_without_rebase_plan() {
 
     assert_eq!(
         git_output(repo.path(), &["rev-parse", "feature/a"]),
-        git_output(remote.path(), &["rev-parse", "refs/heads/feature/a"]),
+        git_output(
+            remote.path(),
+            &[
+                "--git-dir",
+                remote.path().to_str().unwrap(),
+                "rev-parse",
+                "refs/heads/feature/a",
+            ],
+        ),
     );
 }

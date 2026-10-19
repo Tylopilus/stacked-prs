@@ -65,6 +65,8 @@ fn run() -> Result<()> {
         ),
         Command::MarkMerged(args) => mark_merged(&repo, args.branch.as_deref()),
         Command::Pr(args) => match args.command {
+            cli::PrCommand::List(args) => azure::pr_list(&repo, args.json),
+            cli::PrCommand::Show(args) => azure::pr_show(&repo, args.branch_or_pr, args.json),
             cli::PrCommand::Create(args) => {
                 azure::pr_create(&repo, args.branch, args.title, args.draft)
             }
